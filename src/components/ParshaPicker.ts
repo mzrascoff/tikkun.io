@@ -80,16 +80,13 @@ const Browse = (leinings: LeiningInstance[]) => `
   <div class="browse">
     <h2 class="section-heading">פרשת השבוע</h2>
     <ol class="parsha-books mod-emphasize-first-in-group">
-      ${leinings
-        .filter((o) => o.isParsha || isVezosHabracha(o.runs[0]))
-        .reduce((books, leining, idx) => {
-          // TODO: Change to groupBy()
-          const book = leining.runs[0].aliyot[0].start.b
-          books[book] = books[book] || []
-          books[book].push({ ...leining, idx })
-          return books
-        }, [])
-        .map(Book)
+      ${Object.values(
+        Object.groupBy(
+          leinings.filter((o) => o.isParsha || isVezosHabracha(o.runs[0])),
+          (leining) => leining.runs[0].aliyot[0].start.b,
+        ),
+      )
+        .map((book) => Book(book!))
         .join('')}
     </ol>
 
