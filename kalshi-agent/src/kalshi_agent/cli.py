@@ -77,17 +77,20 @@ def scan(
                 continue
 
             # The series endpoint returns metadata stubs with empty
-            # order books. Re-fetch each market individually for the
-            # live quote.
+            # order books. Re-fetch each market individually (across
+            # multiple Kalshi hosts) for the live quote.
             markets: list[Market] = []
+            fetch_debug: dict[str, str] = {}
             for stub in stubs:
-                live = client.get_market(stub.ticker)
+                live, attempts = client.get_market(stub.ticker)
+                fetch_debug[stub.ticker] = attempts
                 markets.append(live or stub)
 
             series_diag: list[dict] = []
             eligible = []
             for m in markets:
                 row: dict = {**dataclasses.asdict(m)}
+                row["fetch_debug"] = fetch_debug.get(m.ticker, "")
                 ok, reason = _eligible(m, min_days=min_days, min_oi=min_oi)
                 if not ok:
                     row["verdict"] = f"drop:{reason}"
@@ -145,6 +148,28 @@ def scan(
     if store and opportunities:
         scan_id = store.record_scan(opportunities)
         console.print(f"\n[dim]Persisted scan #{scan_id} to {db}[/dim]")
+
+
+@app.command()
+def probe(ticker: str = typer.Argument(...)) -> None:
+    """Hit each Kalshi host directly for `ticker` and print the raw response."""
+    import httpx as _httpx
+
+    from .api import BASE_URL_FALLBACKS, DEFAULT_UA
+
+    with _httpx.Client(
+        timeout=15, headers={"User-Agent": DEFAULT_UA, "Accept": "application/json"}
+    ) as c:
+        for base in BASE_URL_FALLBACKS:
+            url = f"{base}/markets/{ticker}"
+            console.print(f"\n[bold]GET {url}[/bold]")
+            try:
+                r = c.get(url)
+                console.print(f"  HTTP {r.status_code}")
+                txt = r.text
+                console.print(f"  body[:600]: {txt[:600]}")
+            except Exception as e:
+                console.print(f"  ERR {type(e).__name__}: {e}")
 
 
 @app.command()

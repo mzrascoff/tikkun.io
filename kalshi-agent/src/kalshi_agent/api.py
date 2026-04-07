@@ -13,6 +13,15 @@ from typing import Iterator
 import httpx
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+
+# Fallback chain. Kalshi runs the regulated DCM under multiple hostnames;
+# the elections subdomain returns metadata stubs for non-political markets,
+# while trading-api / api carry the live order books.
+BASE_URL_FALLBACKS = (
+    "https://api.elections.kalshi.com/trade-api/v2",
+    "https://trading-api.kalshi.com/trade-api/v2",
+    "https://api.kalshi.com/trade-api/v2",
+)
 DEFAULT_UA = "kalshi-agent/0.1 (research; +https://github.com/mzrascoff/tikkun.io)"
 
 
@@ -101,24 +110,42 @@ class KalshiClient:
             if not cursor or (max_pages is not None and pages >= max_pages):
                 return
 
-    def get_market(self, ticker: str) -> Market | None:
+    def get_market(self, ticker: str) -> tuple[Market | None, str]:
         """Fetch a single market by ticker for live snapshot data.
 
-        The /markets list endpoint with a series filter returns
-        metadata stubs whose `yes_bid`/`yes_ask`/`volume` are zero.
-        The single-market endpoint returns the live order book.
+        Tries each base URL in BASE_URL_FALLBACKS until one returns a
+        market with non-zero bid OR ask. Returns (market_or_none, debug_str).
         """
-        self._throttle()
-        try:
-            resp = self._client.get(f"{self.base_url}/markets/{ticker}")
-            resp.raise_for_status()
-        except httpx.HTTPStatusError:
-            return None
-        payload = resp.json()
-        raw = payload.get("market") or payload
-        if not raw:
-            return None
-        return Market.from_api(raw)
+        attempts: list[str] = []
+        for base in BASE_URL_FALLBACKS:
+            self._throttle()
+            url = f"{base}/markets/{ticker}"
+            try:
+                resp = self._client.get(url)
+                status = resp.status_code
+            except httpx.HTTPError as e:
+                attempts.append(f"{base}: ERR {type(e).__name__}")
+                continue
+            if status != 200:
+                attempts.append(f"{base}: HTTP {status}")
+                continue
+            try:
+                payload = resp.json()
+            except Exception:
+                attempts.append(f"{base}: bad JSON")
+                continue
+            raw = payload.get("market") or payload
+            if not raw or not isinstance(raw, dict):
+                attempts.append(f"{base}: empty payload")
+                continue
+            mk = Market.from_api(raw)
+            attempts.append(
+                f"{base}: bid={mk.yes_bid:.2f} ask={mk.yes_ask:.2f} vol={mk.volume}"
+            )
+            if mk.yes_bid > 0 or mk.yes_ask > 0:
+                return mk, " | ".join(attempts)
+            # Try next host if this one returned a stub.
+        return None, " | ".join(attempts)
 
     def fetch_series(self, series_ticker: str) -> list[Market]:
         """Fetch all open markets in a series. Tries series_ticker first,
