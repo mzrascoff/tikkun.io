@@ -44,61 +44,68 @@ def evaluate(
     now: datetime | None = None,
 ) -> Opportunity | None:
     """Return the best (YES or NO) trade for this market under `prior`,
-    or None if neither side has positive fee-adjusted edge."""
-    p_yes = prior.probability
-    yes_cost = m.yes_ask
-    no_cost = 1.0 - m.yes_bid  # buying NO is selling YES at the bid
+    or None if neither side has positive fee-adjusted edge.
 
-    if not (0.0 < yes_cost < 1.0) or not (0.0 < no_cost < 1.0):
+    Handles one-sided books: if only yes_bid is quoted, we can still
+    evaluate the NO side at cost = 1 - yes_bid; if only yes_ask is
+    quoted, we can evaluate the YES side at cost = yes_ask.
+    """
+    p_yes = prior.probability
+    yes_cost = m.yes_ask if 0 < m.yes_ask < 1 else None
+    no_cost = (1.0 - m.yes_bid) if 0 < m.yes_bid < 1 else None
+
+    if yes_cost is None and no_cost is None:
         return None
 
     candidates: list[Opportunity] = []
     days = days_until(m.close_time, now=now)
 
     # YES side
-    yes_edge = p_yes - yes_cost
-    if yes_edge > 0:
-        b = (1.0 / yes_cost) - 1.0
-        gross_roi = yes_edge / yes_cost
-        roi = gross_roi - fee_drag
-        if roi > 0:
-            candidates.append(
-                Opportunity(
-                    market=m,
-                    prior=prior,
-                    side="YES",
-                    cost=yes_cost,
-                    fair=p_yes,
-                    edge=yes_edge,
-                    roi=roi,
-                    kelly_fraction=_kelly(p_yes, b),
-                    days_to_resolve=days,
-                    score=0.0,
+    if yes_cost is not None:
+        yes_edge = p_yes - yes_cost
+        if yes_edge > 0:
+            b = (1.0 / yes_cost) - 1.0
+            gross_roi = yes_edge / yes_cost
+            roi = gross_roi - fee_drag
+            if roi > 0:
+                candidates.append(
+                    Opportunity(
+                        market=m,
+                        prior=prior,
+                        side="YES",
+                        cost=yes_cost,
+                        fair=p_yes,
+                        edge=yes_edge,
+                        roi=roi,
+                        kelly_fraction=_kelly(p_yes, b),
+                        days_to_resolve=days,
+                        score=0.0,
+                    )
                 )
-            )
 
     # NO side
     p_no = 1.0 - p_yes
-    no_edge = p_no - no_cost
-    if no_edge > 0:
-        b = (1.0 / no_cost) - 1.0
-        gross_roi = no_edge / no_cost
-        roi = gross_roi - fee_drag
-        if roi > 0:
-            candidates.append(
-                Opportunity(
-                    market=m,
-                    prior=prior,
-                    side="NO",
-                    cost=no_cost,
-                    fair=p_no,
-                    edge=no_edge,
-                    roi=roi,
-                    kelly_fraction=_kelly(p_no, b),
-                    days_to_resolve=days,
-                    score=0.0,
+    if no_cost is not None:
+        no_edge = p_no - no_cost
+        if no_edge > 0:
+            b = (1.0 / no_cost) - 1.0
+            gross_roi = no_edge / no_cost
+            roi = gross_roi - fee_drag
+            if roi > 0:
+                candidates.append(
+                    Opportunity(
+                        market=m,
+                        prior=prior,
+                        side="NO",
+                        cost=no_cost,
+                        fair=p_no,
+                        edge=no_edge,
+                        roi=roi,
+                        kelly_fraction=_kelly(p_no, b),
+                        days_to_resolve=days,
+                        score=0.0,
+                    )
                 )
-            )
 
     if not candidates:
         return None

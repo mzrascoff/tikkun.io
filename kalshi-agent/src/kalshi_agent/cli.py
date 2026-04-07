@@ -20,18 +20,26 @@ console = Console()
 DEFAULT_DB = Path("data/kalshi.sqlite")
 
 
-def _eligible(m: Market, *, min_days: float, min_oi: int) -> bool:
-    """Light structural filter for watchlist markets — we already trust
-    the curation, so we only require it to be open and not micro-illiquid."""
-    if m.status not in ("active", "open"):
-        return False
-    if not (0 < m.yes_ask < 1):
-        return False
-    if days_until(m.close_time) < min_days:
-        return False
+CLOSED_STATUSES = {"closed", "settled", "finalized", "determined"}
+
+
+def _eligible(m: Market, *, min_days: float, min_oi: int) -> tuple[bool, str]:
+    """Light structural filter for watchlist markets. Returns (ok, reason)."""
+    if m.status.lower() in CLOSED_STATUSES:
+        return False, f"status={m.status}"
+    # Accept either side having a price. If only yes_bid is set, we can
+    # still trade NO at (1 - yes_bid). If only yes_ask is set, we can
+    # still trade YES at yes_ask.
+    if m.yes_ask <= 0 and m.yes_bid <= 0:
+        return False, "no quotes"
+    if m.yes_ask >= 1 and m.yes_bid >= 1:
+        return False, "fully resolved"
+    days = days_until(m.close_time)
+    if days < min_days:
+        return False, f"only {days:.1f}d to resolve"
     if m.open_interest < min_oi:
-        return False
-    return True
+        return False, f"oi={m.open_interest}"
+    return True, "ok"
 
 
 @app.command()
@@ -64,28 +72,46 @@ def scan(
                 series_log.append((series_ticker, 0, 0, 0))
                 continue
 
-            eligible = [m for m in markets if _eligible(m, min_days=min_days, min_oi=min_oi)]
+            if debug:
+                console.print(f"\n[bold cyan]{series_ticker}[/bold cyan] -> {len(markets)} markets")
+                for m in markets:
+                    console.print(
+                        f"  {m.ticker}  status={m.status}  bid={m.yes_bid:.2f}  "
+                        f"ask={m.yes_ask:.2f}  oi={m.open_interest}  "
+                        f"close={m.close_time}  | {m.title}"
+                    )
+
+            eligible = []
+            for m in markets:
+                ok, reason = _eligible(m, min_days=min_days, min_oi=min_oi)
+                if not ok:
+                    if debug:
+                        console.print(f"    [red]drop[/red] {m.ticker}: {reason}")
+                    continue
+                eligible.append(m)
+
             scored = 0
             for m in eligible:
                 prior = estimate_prior(m)
                 if prior is None:
                     if debug:
                         console.print(
-                            f"  [yellow]no prior[/yellow] {m.ticker}: {m.title}"
+                            f"    [yellow]no prior[/yellow] {m.ticker}: {m.title}"
                         )
                     continue
                 op = evaluate(m, prior)
                 if op is None:
                     if debug:
                         console.print(
-                            f"  [dim]no edge[/dim] {m.ticker} side-eval returned none"
+                            f"    [dim]no edge[/dim] {m.ticker}: prior={prior.probability:.2%} "
+                            f"vs ask={m.yes_ask:.2f} bid={m.yes_bid:.2f}"
                         )
                     continue
                 if op.edge < min_edge or op.roi < min_roi:
                     if debug:
                         console.print(
-                            f"  [dim]below threshold[/dim] {m.ticker}: "
-                            f"edge={op.edge:+.2f} roi={op.roi:.1%}"
+                            f"    [dim]below threshold[/dim] {m.ticker}: "
+                            f"side={op.side} edge={op.edge:+.2f} roi={op.roi:.1%}"
                         )
                     continue
                 opportunities.append(op)
