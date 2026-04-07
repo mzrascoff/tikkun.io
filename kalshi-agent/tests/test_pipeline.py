@@ -152,6 +152,53 @@ def test_room_temp_superconductor_prior():
     assert op is not None and op.side == "NO"
 
 
+def test_trade_url_builder_known_series():
+    from kalshi_agent.watchlist import trade_url
+    url = trade_url("KXALIENS", "KXALIENS-27")
+    assert url == "https://kalshi.com/markets/kxaliens/aliens/kxaliens-27"
+
+
+def test_trade_url_builder_unknown_series_falls_back():
+    from kalshi_agent.watchlist import trade_url
+    url = trade_url("KXMYSTERY", "KXMYSTERY-99")
+    assert url == "https://kalshi.com/markets/kxmystery"
+
+
+def test_render_html_includes_links_and_safe_escapes():
+    from dataclasses import replace
+    from kalshi_agent.report import render_html
+
+    m = _market(
+        ticker="KXALIENS-27",
+        title="Will the U.S. confirm <aliens> exist before 2027?",
+    )
+    op = evaluate(m, estimate_prior(m, now=NOW), now=NOW)
+    op = replace(op, series_ticker="KXALIENS")
+    html = render_html([op])
+    # Linked to the right URL
+    assert 'href="https://kalshi.com/markets/kxaliens/aliens/kxaliens-27"' in html
+    # HTML-escaped (no raw < >)
+    assert "&lt;aliens&gt;" in html
+    assert "<aliens>" not in html.replace("<!doctype html>", "")
+    # Side label rendered
+    assert "NO" in html
+    # Sizing footnote present
+    assert "Kelly" in html
+
+
+def test_render_markdown_includes_link_column():
+    from dataclasses import replace
+    from kalshi_agent.report import render_markdown
+
+    m = _market()
+    op = replace(
+        evaluate(m, estimate_prior(m, now=NOW), now=NOW),
+        series_ticker="KXALIENS",
+    )
+    md = render_markdown([op])
+    assert "[trade](https://kalshi.com/markets/kxaliens/aliens/" in md
+
+
 def test_storage_round_trip(tmp_path):
     db = tmp_path / "k.sqlite"
     store = Store(db)

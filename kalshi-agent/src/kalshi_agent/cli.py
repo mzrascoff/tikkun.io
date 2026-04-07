@@ -1,8 +1,9 @@
-"""Typer CLI: `kalshi-agent scan`, `kalshi-agent grade`, `kalshi-agent brier`."""
+"""Typer CLI: `kalshi-agent scan`, `kalshi-agent report`, `kalshi-agent grade`, `kalshi-agent brier`."""
 from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -10,9 +11,10 @@ from rich.console import Console
 
 from .api import KalshiClient, Market
 from .filters import days_until
+from .mailer import EmailConfigError, send_html_email
 from .priors import estimate_prior
-from .report import render_markdown
-from .scoring import evaluate
+from .report import render_html, render_markdown, render_rich_table
+from .scoring import Opportunity, evaluate
 from .storage import Store
 from .watchlist import WATCHLIST
 
@@ -44,34 +46,25 @@ def _eligible(m: Market, *, min_days: float, min_oi: int) -> tuple[bool, str]:
     return True, "ok"
 
 
-@app.command()
-def scan(
-    min_edge: float = typer.Option(0.03, help="Minimum fair-vs-cost edge to surface."),
-    min_roi: float = typer.Option(0.03, help="Minimum fee-adjusted ROI to surface."),
-    min_days: float = typer.Option(7.0, help="Minimum days to resolution."),
-    min_oi: int = typer.Option(0, help="Minimum open interest."),
-    db: Path = typer.Option(DEFAULT_DB, help="SQLite database path."),
-    persist: bool = typer.Option(True, help="Write results to the SQLite store."),
-    debug: bool = typer.Option(False, help="Print per-series fetch and matching detail."),
-) -> None:
-    """Fetch each watchlist series directly, score against priors, rank.
-
-    This is the default mode and the right one to use. It mirrors the
-    hand-curated 'Kalshi Edge Opportunities' list.
-    """
+def _run_scan(
+    *,
+    min_edge: float,
+    min_roi: float,
+    min_days: float,
+    min_oi: int,
+) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict]:
+    """Shared fetch+score loop. Returns (opportunities, series_log, diag)."""
     client = KalshiClient()
-    store = Store(db) if persist else None
-    opportunities = []
-    series_log: list[tuple[str, int, int, int]] = []  # series, fetched, eligible, scored
-    diag: dict[str, list[dict]] = {}  # series -> list of per-market diagnostics
+    opportunities: list[Opportunity] = []
+    series_log: list[tuple[str, int, int, int]] = []
+    diag: dict[str, list[dict]] = {}
 
     try:
-        for series_ticker, label, _why in WATCHLIST:
+        for series in WATCHLIST:
+            series_ticker = series.ticker
             try:
                 stubs = client.fetch_series(series_ticker)
-            except Exception as e:
-                if debug:
-                    console.print(f"[red]ERR[/red] {series_ticker}: {e}")
+            except Exception:
                 series_log.append((series_ticker, 0, 0, 0))
                 diag[series_ticker] = []
                 continue
@@ -113,6 +106,8 @@ def scan(
                 if op is None:
                     row["verdict"] = "no_edge"
                     continue
+                # tag with originating series so the renderer can build URLs
+                op = dataclasses.replace(op, series_ticker=series_ticker)
                 row["side"] = op.side
                 row["edge"] = op.edge
                 row["roi"] = op.roi
@@ -127,7 +122,16 @@ def scan(
     finally:
         client.close()
 
-    # Always write the diagnostic dump so the user has something to share.
+    return opportunities, series_log, diag
+
+
+def _print_summary(
+    opportunities: list[Opportunity],
+    series_log: list[tuple[str, int, int, int]],
+    diag: dict,
+    *,
+    show_table: bool = True,
+) -> None:
     diag_path = Path("data/last-scan-debug.json")
     diag_path.parent.mkdir(parents=True, exist_ok=True)
     diag_path.write_text(json.dumps(diag, indent=2, default=str))
@@ -142,12 +146,81 @@ def scan(
         f"\nFetched {total_fetched} markets across {len(WATCHLIST)} watchlist "
         f"series, surfaced {len(opportunities)} opportunities."
     )
-    console.print(f"[dim]Per-market diagnostic written to {diag_path}[/dim]")
-    console.print(render_markdown(opportunities))
+    console.print(f"[dim]Per-market diagnostic written to {diag_path}[/dim]\n")
 
-    if store and opportunities:
-        scan_id = store.record_scan(opportunities)
+    if show_table:
+        console.print(render_rich_table(opportunities))
+
+
+@app.command()
+def scan(
+    min_edge: float = typer.Option(0.03, help="Minimum fair-vs-cost edge to surface."),
+    min_roi: float = typer.Option(0.03, help="Minimum fee-adjusted ROI to surface."),
+    min_days: float = typer.Option(7.0, help="Minimum days to resolution."),
+    min_oi: int = typer.Option(0, help="Minimum open interest."),
+    db: Path = typer.Option(DEFAULT_DB, help="SQLite database path."),
+    persist: bool = typer.Option(True, help="Write results to the SQLite store."),
+) -> None:
+    """Fetch each watchlist series, score, and print a pretty terminal table."""
+    opportunities, series_log, diag = _run_scan(
+        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
+    )
+    _print_summary(opportunities, series_log, diag)
+    if persist and opportunities:
+        scan_id = Store(db).record_scan(opportunities)
         console.print(f"\n[dim]Persisted scan #{scan_id} to {db}[/dim]")
+
+
+@app.command()
+def report(
+    min_edge: float = typer.Option(0.03),
+    min_roi: float = typer.Option(0.03),
+    min_days: float = typer.Option(7.0),
+    min_oi: int = typer.Option(0),
+    db: Path = typer.Option(DEFAULT_DB),
+    email: bool = typer.Option(
+        False,
+        "--email/--no-email",
+        help="Send the HTML report via SMTP using KALSHI_SMTP_* env vars.",
+    ),
+    persist: bool = typer.Option(True),
+) -> None:
+    """Run a scan and produce the daily report (terminal + optional email)."""
+    opportunities, series_log, diag = _run_scan(
+        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
+    )
+    _print_summary(opportunities, series_log, diag)
+
+    # Always write the HTML report to disk so launchd users can inspect it.
+    now = datetime.now(tz=timezone.utc)
+    html = render_html(opportunities, generated_at=now)
+    html_path = Path("data/last-report.html")
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(html)
+    console.print(f"[dim]HTML report written to {html_path}[/dim]")
+
+    if persist and opportunities:
+        scan_id = Store(db).record_scan(opportunities)
+        console.print(f"[dim]Persisted scan #{scan_id} to {db}[/dim]")
+
+    if email:
+        try:
+            subject = (
+                f"Kalshi Edge Report — {now.strftime('%Y-%m-%d')} — "
+                f"{len(opportunities)} opportunities"
+            )
+            send_html_email(
+                subject=subject,
+                html_body=html,
+                text_fallback=render_markdown(opportunities),
+            )
+            console.print(f"[green]✓[/green] Emailed report to recipients.")
+        except EmailConfigError as e:
+            console.print(f"[red]Email config error:[/red] {e}")
+            raise typer.Exit(code=2)
+        except Exception as e:
+            console.print(f"[red]Email send failed:[/red] {type(e).__name__}: {e}")
+            raise typer.Exit(code=3)
 
 
 @app.command()

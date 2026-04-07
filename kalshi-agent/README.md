@@ -28,15 +28,51 @@ It writes ranked opportunities to a SQLite database and prints a report.
 ```bash
 cd kalshi-agent
 python -m venv .venv && source .venv/bin/activate
-pip install -e .
-kalshi-agent scan --limit 200 --min-edge 0.05
+pip install --upgrade pip setuptools wheel
+pip install -e ".[dev]"
+kalshi-agent scan          # pretty terminal table with clickable links
+kalshi-agent report        # same scan + writes data/last-report.html
+kalshi-agent report --email   # also sends the HTML report by SMTP
 ```
 
-To run the unit tests:
-
+Tests:
 ```bash
 pytest
 ```
+
+## Daily email report
+
+The agent ships with everything to run itself every day at 7am via macOS
+launchd, build an HTML report, and email it to you.
+
+### 1. Set SMTP credentials
+
+For Gmail you must enable 2FA and create an [app
+password](https://myaccount.google.com/apppasswords) (Gmail will refuse
+your real password over SMTP). Other providers work too — point the
+`KALSHI_SMTP_HOST` env var at their server.
+
+### 2. Edit the launchd plist
+
+Open `scripts/com.mrascoff.kalshi-agent.plist` and replace:
+- `/Users/mrascoff/tikkun.io` with the absolute path to your clone
+- `YOUR_GMAIL@gmail.com` / `YOUR_GMAIL_APP_PASSWORD` / `YOUR_INBOX@example.com`
+  with real values
+
+### 3. Install and start
+
+```bash
+cp scripts/com.mrascoff.kalshi-agent.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.mrascoff.kalshi-agent.plist
+# fire it once on demand to confirm:
+launchctl start com.mrascoff.kalshi-agent
+# check the logs:
+tail -f data/launchd.out.log data/launchd.err.log
+```
+
+The job will fire every day at 07:00 local time and email you the
+ranked report. Each row in the email links directly to the Kalshi trade
+page for that contract.
 
 ## Architecture
 

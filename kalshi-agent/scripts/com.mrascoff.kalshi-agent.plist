@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job: run kalshi-agent every day at 07:00 local time
+  and email the report.
+
+  Install:
+    cp scripts/com.mrascoff.kalshi-agent.plist ~/Library/LaunchAgents/
+    # edit the paths and env vars below first
+    launchctl load ~/Library/LaunchAgents/com.mrascoff.kalshi-agent.plist
+
+  To run once on demand:
+    launchctl start com.mrascoff.kalshi-agent
+
+  To uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.mrascoff.kalshi-agent.plist
+
+  Edit BEFORE installing:
+    * Replace /Users/mrascoff/tikkun.io with the absolute path to YOUR clone.
+    * Fill in KALSHI_SMTP_* and KALSHI_EMAIL_TO with real values.
+    * If you use Gmail you MUST create an app password (not your real pw)
+      at https://myaccount.google.com/apppasswords
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mrascoff.kalshi-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mrascoff/tikkun.io/kalshi-agent/.venv/bin/kalshi-agent</string>
+        <string>report</string>
+        <string>--email</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mrascoff/tikkun.io/kalshi-agent</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+        <key>KALSHI_SMTP_HOST</key>
+        <string>smtp.gmail.com</string>
+        <key>KALSHI_SMTP_PORT</key>
+        <string>587</string>
+        <key>KALSHI_SMTP_USER</key>
+        <string>YOUR_GMAIL@gmail.com</string>
+        <key>KALSHI_SMTP_PASS</key>
+        <string>YOUR_GMAIL_APP_PASSWORD</string>
+        <key>KALSHI_EMAIL_FROM</key>
+        <string>YOUR_GMAIL@gmail.com</string>
+        <key>KALSHI_EMAIL_TO</key>
+        <string>YOUR_INBOX@example.com</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mrascoff/tikkun.io/kalshi-agent/data/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mrascoff/tikkun.io/kalshi-agent/data/launchd.err.log</string>
+</dict>
+</plist>

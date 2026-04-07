@@ -1,41 +1,69 @@
 """Curated watchlist of known science / tech / geopolitical longshot
 markets where a literature-grounded prior should beat the crowd.
 
-Each entry is a Kalshi *series ticker* (e.g. `KXALIENS`), which groups
-related markets across resolution dates. The scanner expands each
-series into its individual markets via the API.
-
-Add new entries here as you find them. The matching `priors.py` rule
-must already exist or the prior dispatcher will skip the market.
-
-Series tickers are sourced from the public Kalshi market URLs in the
-form `kalshi.com/markets/<series>/<slug>`.
+Each entry includes the canonical Kalshi series-page URL so the report
+can link directly to the trade page.
 """
 from __future__ import annotations
 
-# (series_ticker, short label, why-it's-here)
-WATCHLIST: tuple[tuple[str, str, str], ...] = (
+from typing import NamedTuple
+
+
+class Series(NamedTuple):
+    ticker: str           # e.g. "KXALIENS"
+    url: str              # canonical kalshi.com series-page URL
+    label: str            # short human label
+    why: str              # rationale for inclusion
+
+
+# URL pattern is `https://kalshi.com/markets/<series_lower>/<slug>` and
+# specific contracts append `/<ticker_lower>`.
+WATCHLIST: tuple[Series, ...] = (
     # ----- Science / cosmology -----
-    ("KXALIENS", "Aliens confirmed", "ET disclosure has 0 historical hits"),
-    ("KXSUPERCON", "Room-temp superconductor", "RT-ambient SC never replicated"),
+    Series("KXALIENS",  "https://kalshi.com/markets/kxaliens/aliens",
+           "Aliens confirmed", "ET disclosure has 0 historical hits"),
+    Series("KXSUPERCON", "https://kalshi.com/markets/supercon/roomtemp-superconductor",
+           "Room-temp superconductor", "RT-ambient SC never replicated"),
 
     # ----- AI / AGI -----
-    ("KXOAIAGI", "OpenAI AGI", "Contractual, not capability-based"),
-    ("KXAGI", "AGI declared", "Generic AGI longshots"),
+    Series("KXOAIAGI",  "https://kalshi.com/markets/kxoaiagi/openai-achieves-agi",
+           "OpenAI AGI", "Contractual, not capability-based"),
+    Series("KXAGI",     "https://kalshi.com/markets/kxagi/agi",
+           "AGI declared", "Generic AGI longshots"),
 
     # ----- Space / Mars -----
-    ("KXHLS", "SpaceX HLS test", "Starship is years behind crewed cadence"),
-    ("KXSTARSHIP", "Starship milestones", "Elon-time discount"),
-    ("KXMARS", "Mars landing", "No life support, no orbital refuel"),
+    Series("KXHLS",     "https://kalshi.com/markets/kxhls/hls",
+           "SpaceX HLS test", "Starship is years behind crewed cadence"),
+    Series("KXSTARSHIP", "https://kalshi.com/markets/kxstarship/starship",
+           "Starship milestones", "Elon-time discount"),
+    Series("KXMARS",    "https://kalshi.com/markets/kxmars/mars",
+           "Mars landing", "No life support, no orbital refuel"),
 
     # ----- Fusion / energy -----
-    ("KXFUSION", "Commercial fusion", "Grid fusion not on credible roadmap"),
+    Series("KXFUSION",  "https://kalshi.com/markets/kxfusion/nuclear-fusion",
+           "Commercial fusion", "Grid fusion not on credible roadmap"),
 
     # ----- Health -----
-    ("KXCURE", "Disease cures", "No 'cure' announcement has ever resolved YES"),
-    ("KXALZ", "Alzheimer's cure", "No disease-modifying cure exists"),
+    Series("KXCURE",    "https://kalshi.com/markets/kxcure/disease-cures",
+           "Disease cures", "No 'cure' announcement has ever resolved YES"),
+    Series("KXALZ",     "https://kalshi.com/markets/kxalz/alzheimers",
+           "Alzheimer's cure", "No disease-modifying cure exists"),
 
     # ----- Geopolitics where a science/evidence prior helps -----
-    ("KXIRANNUKE", "Iran nuclear weapon", "Weaponization gating step is months+"),
-    ("KXUSAIRANAGREEMENT", "US-Iran nuclear deal", "Historical base rate is very low"),
+    Series("KXIRANNUKE", "https://kalshi.com/markets/kxirannuke/iran-nuclear-weapon",
+           "Iran nuclear weapon", "Weaponization gating step is months+"),
+    Series("KXUSAIRANAGREEMENT",
+           "https://kalshi.com/markets/kxusairanagreement/us-iran-nuclear-deal",
+           "US-Iran nuclear deal", "Historical base rate is very low"),
 )
+
+
+SERIES_BY_TICKER: dict[str, Series] = {s.ticker: s for s in WATCHLIST}
+
+
+def trade_url(series_ticker: str, market_ticker: str) -> str:
+    """Build a direct trade-page URL for a specific market."""
+    series = SERIES_BY_TICKER.get(series_ticker)
+    if series is None:
+        return f"https://kalshi.com/markets/{series_ticker.lower()}"
+    return f"{series.url}/{market_ticker.lower()}"

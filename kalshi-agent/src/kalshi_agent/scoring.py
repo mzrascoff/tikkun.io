@@ -25,6 +25,7 @@ class Opportunity:
     kelly_fraction: float  # full-Kelly bankroll fraction (use a fraction of this!)
     days_to_resolve: float
     score: float  # composite ranking score
+    series_ticker: str = ""  # which watchlist series this came from
 
 
 def _kelly(p: float, b: float) -> float:
@@ -131,4 +132,5 @@ def _scored(o: Opportunity) -> Opportunity:
         kelly_fraction=o.kelly_fraction,
         days_to_resolve=o.days_to_resolve,
         score=score,
+        series_ticker=o.series_ticker,
     )
