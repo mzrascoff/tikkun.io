@@ -106,6 +106,55 @@ kalshi-agent scan --no-polymarket    # Kalshi only
 kalshi-agent scan                    # both venues, default
 ```
 
+## Live portfolio (authenticated Kalshi API)
+
+The agent can pull your **current Kalshi positions and cash balance**
+each morning via Kalshi's authenticated API. When enabled, the daily
+report adds:
+
+- A **portfolio panel** at the top showing every open position with
+  side, quantity, average cost, market value, and percentage of bankroll
+- **Position context on each opportunity row** ("you already hold 100
+  NO contracts of this") so you don't accidentally double up
+- A **concentration warning** ("⚠️ already 74% of bankroll on this
+  ticker — DO NOT ADD") when any single position exceeds 40% of total
+  bankroll
+
+By design, the `portfolio.py` module imports nothing that can place
+orders. Adding trading would require a separate explicit module with
+its own safety scaffolding (rate limits, kill switches, dry-run mode,
+slippage caps).
+
+### Setup
+
+1. Open https://kalshi.com/account/profile in your browser
+2. Scroll to **API keys** → click **Create new API key**
+3. Kalshi gives you a **Key ID** (a UUID) and downloads an **RSA
+   private key** as a `.pem` file
+4. Move the `.pem` file somewhere private:
+   ```
+   mkdir -p ~/.kalshi
+   mv ~/Downloads/kalshi-private-key.pem ~/.kalshi/private-key.pem
+   chmod 600 ~/.kalshi/private-key.pem
+   ```
+5. Add two env vars to `~/.zshrc`:
+   ```
+   export KALSHI_KEY_ID=your-key-id-from-kalshi
+   export KALSHI_PRIVATE_KEY_PATH=~/.kalshi/private-key.pem
+   ```
+6. Add the same env vars to your launchd plist's
+   `EnvironmentVariables` block so the daily 7am job inherits them.
+7. `source ~/.zshrc && kalshi-agent scan` to confirm.
+
+### Privacy / safety
+
+- **Read-only.** `portfolio.py` only calls GET endpoints
+  (`/portfolio/balance`, `/portfolio/positions`). No order placement.
+- **Private key never leaves the local filesystem.** The agent reads
+  the file once per scan, signs requests in memory, and never logs
+  the key material.
+- **Skip with `--no-portfolio`** if you don't want to enable it.
+
 ## Inbox signal (read-only IMAP)
 
 The agent can also scan your **personal inbox** for fresh signal each
@@ -189,7 +238,9 @@ kalshi-agent report --no-news
 ```
 src/kalshi_agent/
   __init__.py
-  api.py          # Kalshi REST client (read-only, no auth needed)
+  api.py          # Kalshi public REST client (read-only, no auth needed)
+  kalshi_auth.py  # RSA-PSS request signing for authenticated endpoints
+  portfolio.py    # READ-ONLY Kalshi portfolio fetchers (balance + positions)
   polymarket.py   # Polymarket gamma API client + watchlist + filter
   filters.py      # tail-price + liquidity filtering
   watchlist.py    # curated Kalshi series + venue-aware URL builder
@@ -198,7 +249,7 @@ src/kalshi_agent/
   email_reader.py # READ-ONLY IMAP inbox scanner for personal signal
   scoring.py      # edge, Kelly, annualized ROI, multi-venue ranker
   storage.py      # SQLite persistence + run history
-  report.py       # rich + markdown + HTML renderers with venue badge
+  report.py       # rich + markdown + HTML renderers with portfolio panel
   mailer.py       # SMTP email sender for daily report
   cli.py          # `kalshi-agent` entry point
 scripts/

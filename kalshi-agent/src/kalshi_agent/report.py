@@ -12,6 +12,40 @@ from .scoring import Opportunity
 from .watchlist import trade_url
 
 
+def render_portfolio_panel(portfolio_ctx) -> Table:
+    """Compact rich.Table summarizing the user's current Kalshi positions."""
+    table = Table(
+        title=f"Your Kalshi Portfolio  —  ${portfolio_ctx.total_bankroll_dollars:.2f} bankroll  ·  ${portfolio_ctx.balance.settled_dollars:.2f} cash",
+        title_style="bold magenta",
+        header_style="bold",
+        show_lines=False,
+        expand=True,
+    )
+    table.add_column("Ticker", style="bold")
+    table.add_column("Side", justify="center", width=4)
+    table.add_column("Qty", justify="right", width=6)
+    table.add_column("Avg cost", justify="right", width=10)
+    table.add_column("Cost basis", justify="right", width=12)
+    table.add_column("Mkt value", justify="right", width=12)
+    table.add_column("% of bankroll", justify="right", width=14)
+
+    bankroll = portfolio_ctx.total_bankroll_dollars or 1.0
+    for p in sorted(portfolio_ctx.positions, key=lambda x: x.market_value_cents, reverse=True):
+        pct = p.market_value_dollars / bankroll
+        warn = " ⚠️" if pct >= 0.40 else ""
+        side_style = "green" if p.side == "NO" else "yellow"
+        table.add_row(
+            p.ticker,
+            Text(p.side, style=side_style),
+            str(p.quantity),
+            f"${p.avg_cost:.2f}",
+            f"${p.cost_basis_dollars:.2f}",
+            f"${p.market_value_dollars:.2f}",
+            f"{pct:.0%}{warn}",
+        )
+    return table
+
+
 def _signal_line(*, icon: str, icon_color: str, primary_html: str, secondary: str) -> str:
     return (
         f'<div style="margin-top:4px; font-size:11px;">'
@@ -132,10 +166,59 @@ def render_rich_table(opportunities: Iterable[Opportunity]) -> Table:
     return table
 
 
-def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime | None = None) -> str:
+def _render_portfolio_html(portfolio_ctx) -> str:
+    """HTML block summarizing the user's current Kalshi positions."""
+    if portfolio_ctx is None or portfolio_ctx.balance is None or not portfolio_ctx.positions:
+        return ""
+    bankroll = portfolio_ctx.total_bankroll_dollars or 1.0
+    rows_html = ""
+    for p in sorted(portfolio_ctx.positions, key=lambda x: x.market_value_cents, reverse=True):
+        pct = p.market_value_dollars / bankroll
+        warn = ' <span style="color:#a36600;">⚠️</span>' if pct >= 0.40 else ""
+        side_color = "#0a7a30" if p.side == "NO" else "#a36600"
+        rows_html += (
+            f'<tr style="background:#fff;">'
+            f'<td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; font-family:monospace; font-size:11px;">{escape(p.ticker)}</td>'
+            f'<td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; color:{side_color}; font-weight:700;">{p.side}</td>'
+            f'<td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; text-align:right; font-variant-numeric:tabular-nums;">{p.quantity}</td>'
+            f'<td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; text-align:right; font-variant-numeric:tabular-nums;">${p.avg_cost:.2f}</td>'
+            f'<td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; text-align:right; font-variant-numeric:tabular-nums;">${p.market_value_dollars:.2f}</td>'
+            f'<td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; text-align:right; font-variant-numeric:tabular-nums; font-weight:600;">{pct:.0%}{warn}</td>'
+            f'</tr>'
+        )
+    return (
+        '<div style="margin:0 0 24px 0; padding:12px 14px; background:#faf5ff; border:1px solid #e0d4f0; border-radius:6px;">'
+        f'<div style="font-size:14px; font-weight:700; color:#5a2d8a; margin-bottom:8px;">Your Kalshi Portfolio</div>'
+        f'<div style="font-size:12px; color:#666; margin-bottom:10px;">'
+        f'${portfolio_ctx.total_bankroll_dollars:.2f} total bankroll &middot; '
+        f'${portfolio_ctx.balance.settled_dollars:.2f} cash &middot; '
+        f'{len(portfolio_ctx.positions)} open position(s)'
+        f'</div>'
+        '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; width:100%; font-size:12px;">'
+        '<thead><tr style="background:#f0e6fa; text-align:left;">'
+        '<th style="padding:6px 8px;">Ticker</th>'
+        '<th style="padding:6px 8px;">Side</th>'
+        '<th style="padding:6px 8px; text-align:right;">Qty</th>'
+        '<th style="padding:6px 8px; text-align:right;">Avg cost</th>'
+        '<th style="padding:6px 8px; text-align:right;">Mkt value</th>'
+        '<th style="padding:6px 8px; text-align:right;">% bankroll</th>'
+        '</tr></thead><tbody>'
+        + rows_html +
+        '</tbody></table></div>'
+    )
+
+
+def render_html(
+    opportunities: Iterable[Opportunity],
+    *,
+    generated_at: datetime | None = None,
+    portfolio_ctx=None,
+) -> str:
     """Self-contained HTML email body. Inline CSS for client compatibility.
 
-    Trades are listed best-to-worst as ranked by `scoring.rank()`.
+    Trades are listed best-to-worst as ranked by `scoring.rank()`. If a
+    `portfolio_ctx` with positions is supplied, a portfolio panel is
+    rendered above the opportunities table.
     """
     rows = _ordered(opportunities)
     when = (generated_at or datetime.utcnow()).strftime("%Y-%m-%d %H:%M UTC")
@@ -145,6 +228,7 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
   <h1 style="font-size:20px; margin:0 0 4px 0;">Kalshi Edge Opportunities</h1>
   <p style="color:#666; margin:0 0 18px 0; font-size:13px;">Generated {when} &middot; ranked best to worst &middot; annualized ROI shown &middot; ¼-Kelly suggested sizing</p>
 """
+    head += _render_portfolio_html(portfolio_ctx)
 
     if not rows:
         return head + "<p><em>No opportunities found in today's scan.</em></p></body></html>"

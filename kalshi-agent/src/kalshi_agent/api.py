@@ -12,14 +12,13 @@ from typing import Iterator
 
 import httpx
 
-BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
-
 # Despite the name, api.elections.kalshi.com is the canonical host for
 # all Kalshi markets. trading-api.kalshi.com returns a migration notice
 # and api.kalshi.com does not resolve.
-BASE_URL_FALLBACKS = (
-    "https://api.elections.kalshi.com/trade-api/v2",
-)
+API_HOST = "https://api.elections.kalshi.com"
+API_PATH_PREFIX = "/trade-api/v2"
+BASE_URL = f"{API_HOST}{API_PATH_PREFIX}"
+BASE_URL_FALLBACKS = (BASE_URL,)
 DEFAULT_UA = "kalshi-agent/0.1 (research; +https://github.com/mzrascoff/tikkun.io)"
 
 

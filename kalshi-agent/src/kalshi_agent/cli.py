@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from .polymarket import (
     PolymarketClient,
     filter_by_watchlist as poly_filter,
 )
+from .portfolio import PortfolioContext, fetch_portfolio
 from .priors import estimate_prior
 from .report import render_html, render_markdown, render_rich_table
 from .scoring import Opportunity, evaluate, rank
@@ -39,9 +41,10 @@ def _attach_signals(
     series_ticker: str,
     matched_news: list,
     matched_emails: list,
+    portfolio_ctx: PortfolioContext | None = None,
 ) -> Opportunity:
     """Tag an opportunity with its originating series plus any matched
-    news headlines and inbox mentions for that series."""
+    news headlines, inbox mentions, and the user's existing position."""
     op = dataclasses.replace(op, series_ticker=series_ticker)
     if matched_news:
         op = dataclasses.replace(
@@ -55,6 +58,14 @@ def _attach_signals(
             email_mentions=tuple(matched_emails),
             email_confidence_drag=email_confidence_adjustment(len(matched_emails)),
         )
+    if portfolio_ctx is not None and portfolio_ctx.balance is not None:
+        existing = portfolio_ctx.position_for(op.market.ticker)
+        if existing is not None:
+            op = dataclasses.replace(
+                op,
+                current_position=existing,
+                concentration_pct=portfolio_ctx.concentration_pct(op.market.ticker),
+            )
     return op
 
 
@@ -86,10 +97,22 @@ def _run_scan(
     news: bool = True,
     polymarket: bool = True,
     inbox: bool = True,
-) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict, NewsContext]:
-    """Shared fetch+score loop. Returns (opportunities, series_log, diag, news_ctx)."""
+    portfolio: bool = True,
+) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict, NewsContext, PortfolioContext]:
+    """Shared fetch+score loop. Returns (opportunities, series_log, diag, news_ctx, portfolio_ctx)."""
     client = KalshiClient()
-    news_ctx = fetch_news() if news else NewsContext()
+
+    # Fetch news, inbox, and portfolio in parallel — they hit three
+    # independent remote services and would otherwise add ~3-4s of
+    # sequential I/O before the watchlist loop can start.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        news_future = pool.submit(fetch_news) if news else None
+        email_future = pool.submit(fetch_emails) if inbox else None
+        portfolio_future = pool.submit(fetch_portfolio) if portfolio else None
+        news_ctx = news_future.result() if news_future else NewsContext()
+        email_ctx = email_future.result() if email_future else EmailContext()
+        portfolio_ctx = portfolio_future.result() if portfolio_future else PortfolioContext(enabled=False)
+
     if news_ctx.headlines:
         console.print(
             f"[dim]Pulled {len(news_ctx.headlines)} headlines from "
@@ -99,11 +122,19 @@ def _run_scan(
         for src, err in news_ctx.fetch_errors.items():
             console.print(f"[dim yellow]news warn {src}: {err}[/dim yellow]")
 
-    email_ctx = fetch_emails() if inbox else EmailContext()
     if email_ctx.items:
         console.print(f"[dim]Scanned {len(email_ctx.items)} recent emails (read-only)[/dim]")
     if email_ctx.fetch_error:
         console.print(f"[dim yellow]inbox warn: {email_ctx.fetch_error}[/dim yellow]")
+
+    if portfolio_ctx.balance is not None:
+        console.print(
+            f"[dim]Portfolio: ${portfolio_ctx.balance.settled_dollars:.2f} cash, "
+            f"{len(portfolio_ctx.positions)} open positions, "
+            f"${portfolio_ctx.total_bankroll_dollars:.2f} total bankroll[/dim]"
+        )
+    if portfolio_ctx.fetch_error:
+        console.print(f"[dim yellow]portfolio warn: {portfolio_ctx.fetch_error}[/dim yellow]")
 
     opportunities: list[Opportunity] = []
     series_log: list[tuple[str, int, int, int]] = []
@@ -163,7 +194,7 @@ def _run_scan(
                 if op is None:
                     row["verdict"] = "no_edge"
                     continue
-                op = _attach_signals(op, series_ticker, series_news, series_emails)
+                op = _attach_signals(op, series_ticker, series_news, series_emails, portfolio_ctx)
                 row["side"] = op.side
                 row["edge"] = op.edge
                 row["roi"] = op.roi
@@ -215,6 +246,7 @@ def _run_scan(
                     series_ticker=m.ticker,  # polymarket uses the slug as the series identifier
                     matched_news=news_ctx.matching(kw_list) if kw_list else [],
                     matched_emails=email_ctx.matching(kw_list) if kw_list else [],
+                    portfolio_ctx=portfolio_ctx,
                 )
                 if op.edge < min_edge or op.roi < min_roi:
                     row["verdict"] = "below_threshold"
@@ -235,7 +267,7 @@ def _run_scan(
     # Tag the polymarket pass into series_log so the summary table renders it.
     series_log.append(("POLYMARKET", *poly_log))
 
-    return opportunities, series_log, diag, news_ctx
+    return opportunities, series_log, diag, news_ctx, portfolio_ctx
 
 
 def _print_summary(
@@ -244,6 +276,7 @@ def _print_summary(
     diag: dict,
     *,
     show_table: bool = True,
+    portfolio_ctx: PortfolioContext | None = None,
 ) -> None:
     diag_path = Path("data/last-scan-debug.json")
     diag_path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,6 +293,10 @@ def _print_summary(
         f"series, surfaced {len(opportunities)} opportunities."
     )
     console.print(f"[dim]Per-market diagnostic written to {diag_path}[/dim]\n")
+
+    if portfolio_ctx is not None and portfolio_ctx.balance is not None and portfolio_ctx.positions:
+        from .report import render_portfolio_panel
+        console.print(render_portfolio_panel(portfolio_ctx))
 
     if show_table:
         console.print(render_rich_table(opportunities))
@@ -278,14 +315,16 @@ def scan(
                                     help="Also scan Polymarket alongside Kalshi."),
     inbox: bool = typer.Option(True, "--inbox/--no-inbox",
                                help="Read recent inbox via IMAP for additional signal."),
+    portfolio: bool = typer.Option(True, "--portfolio/--no-portfolio",
+                                   help="Pull live Kalshi positions via the authenticated API."),
 ) -> None:
     """Fetch each watchlist series, score, and print a pretty terminal table."""
-    opportunities, series_log, diag, _news_ctx = _run_scan(
+    opportunities, series_log, diag, _news_ctx, portfolio_ctx = _run_scan(
         min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
-        news=news, polymarket=polymarket, inbox=inbox,
+        news=news, polymarket=polymarket, inbox=inbox, portfolio=portfolio,
     )
     ranked = rank(opportunities)
-    _print_summary(ranked, series_log, diag)
+    _print_summary(ranked, series_log, diag, portfolio_ctx=portfolio_ctx)
     if persist and ranked:
         scan_id = Store(db).record_scan(ranked)
         console.print(f"\n[dim]Persisted scan #{scan_id} to {db}[/dim]")
@@ -307,18 +346,19 @@ def report(
     news: bool = typer.Option(True, "--news/--no-news"),
     polymarket: bool = typer.Option(True, "--polymarket/--no-polymarket"),
     inbox: bool = typer.Option(True, "--inbox/--no-inbox"),
+    portfolio: bool = typer.Option(True, "--portfolio/--no-portfolio"),
 ) -> None:
     """Run a scan and produce the daily report (terminal + optional email)."""
-    opportunities, series_log, diag, _news_ctx = _run_scan(
+    opportunities, series_log, diag, _news_ctx, portfolio_ctx = _run_scan(
         min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
-        news=news, polymarket=polymarket, inbox=inbox,
+        news=news, polymarket=polymarket, inbox=inbox, portfolio=portfolio,
     )
     ranked = rank(opportunities)
-    _print_summary(ranked, series_log, diag)
+    _print_summary(ranked, series_log, diag, portfolio_ctx=portfolio_ctx)
 
     # Always write the HTML report to disk so launchd users can inspect it.
     now = datetime.now(tz=timezone.utc)
-    html = render_html(ranked, generated_at=now)
+    html = render_html(ranked, generated_at=now, portfolio_ctx=portfolio_ctx)
     html_path = Path("data/last-report.html")
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html)

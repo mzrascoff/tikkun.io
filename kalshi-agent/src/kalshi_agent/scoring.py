@@ -3,11 +3,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from .api import Market
 from .filters import days_until
 from .priors import Prior
+
+
+class _PositionLike(Protocol):
+    """Structural type for the user's existing Kalshi position on a
+    market. Defined here (rather than imported from portfolio.py) so
+    scoring.py stays free of any auth/network dependency. portfolio.
+    Position satisfies this protocol implicitly."""
+    quantity: int
+    side: str
 
 # Kalshi fee approximation. Real fees depend on price; this is a
 # conservative round-trip drag we apply to all gross ROIs.
@@ -42,6 +51,8 @@ class Opportunity:
     venue: str = "kalshi"  # "kalshi" or "polymarket"
     email_mentions: tuple = ()  # tuple[email_reader.EmailItem, ...]
     email_confidence_drag: float = 0.0
+    current_position: _PositionLike | None = None
+    concentration_pct: float = 0.0   # 0..1 fraction of bankroll already in this ticker
 
 
 def _kelly(p: float, b: float) -> float:
@@ -232,6 +243,16 @@ def rank(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
             reasons.append(f"{len(o.news_headlines)} fresh news mention(s) — thesis is moving")
         if o.email_confidence_drag > 0:
             reasons.append(f"{len(o.email_mentions)} inbox mention(s) — you're already watching this")
+        if o.current_position is not None:
+            pos = o.current_position
+            if o.concentration_pct >= 0.40:
+                reasons.append(
+                    f"⚠️ already {o.concentration_pct:.0%} of bankroll on this ticker — DO NOT ADD"
+                )
+            else:
+                reasons.append(
+                    f"already holding {pos.quantity} {pos.side} contracts"
+                )
         if not reasons:
             reasons.append("solid risk-adjusted return")
         series_rank[o.series_ticker] = s_rank + 1
