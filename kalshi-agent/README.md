@@ -74,18 +74,58 @@ The job will fire every day at 07:00 local time and email you the
 ranked report. Each row in the email links directly to the Kalshi trade
 page for that contract.
 
+## News analysis
+
+Each morning's scan also pulls public RSS feeds from the New York
+Times, Wall Street Journal, and Financial Times (no auth required —
+the feeds are headlines + abstracts only). For every market on the
+watchlist, the agent counts how many fresh headlines (last 48 hours)
+match the series' keyword set, and:
+
+1. **Surfaces the matching headlines** in both the terminal report
+   and the daily HTML email, with direct links to each article.
+2. **Reduces the trade's effective confidence** in the ranker by
+   `0.05 × N` (capped at `0.25`). Heavy news flow on a thesis pushes
+   that trade *down* the ranking — when a market is moving on news,
+   you do not want to be the one fading it cold.
+
+The science prior itself is **never** mechanically overridden by news.
+The base rate stays the base rate; only the trade's weighting in the
+final ranker shifts. The user sees the headlines and can override.
+
+To skip the news fetch entirely (e.g. when running offline):
+
+```bash
+kalshi-agent scan --no-news
+kalshi-agent report --no-news
+```
+
+### Caveats
+
+- FT/NYT/WSJ articles are paywalled. The agent only sees what each
+  publication exposes in its public RSS feed (headline + short
+  abstract). Anything that needs the full article body needs a
+  subscription and a per-publication scraper, which is fragile.
+- Feed URLs occasionally rotate. Failures are non-fatal — the agent
+  prints a warning and skips that feed.
+
 ## Architecture
 
 ```
 src/kalshi_agent/
   __init__.py
   api.py          # Kalshi REST client (read-only, no auth needed)
-  filters.py      # category + tail-price filtering
+  filters.py      # tail-price + liquidity filtering
+  watchlist.py    # curated series + URL builder + news keywords
   priors.py       # base-rate table for science/tech claims
-  scoring.py      # edge, Kelly, fee-adjusted ROI
+  news.py         # FT / NYT / WSJ RSS reader + matching
+  scoring.py      # edge, Kelly, annualized ROI, ranker
   storage.py      # SQLite persistence + run history
-  report.py       # markdown report rendering
+  report.py       # rich + markdown + HTML renderers
+  mailer.py       # SMTP email sender for daily report
   cli.py          # `kalshi-agent` entry point
+scripts/
+  com.mrascoff.kalshi-agent.plist   # macOS launchd job, runs daily 7am
 ```
 
 ## Calibration loop

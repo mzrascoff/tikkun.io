@@ -63,19 +63,29 @@ def render_rich_table(opportunities: Iterable[Opportunity]) -> Table:
     table.add_column("Annual.", justify="right", width=8, style="bold green")
     table.add_column("¼-Kelly", justify="right", width=8)
     table.add_column("Days", justify="right", width=5)
+    table.add_column("News", justify="center", width=5)
     table.add_column("Why this rank", overflow="fold")
 
     if not rows:
-        table.add_row("—", "No opportunities found", "", "", "", "", "", "", "")
+        table.add_row("—", "No opportunities found", "", "", "", "", "", "", "", "")
         return table
 
     for i, o in enumerate(rows, 1):
         url = trade_url(o.series_ticker, o.market.ticker)
         title = o.market.title or o.market.ticker
-        link_cell = Text.from_markup(
-            f"[link={url}]{escape(title)}[/link]\n[dim]{o.market.ticker}[/dim]"
-        )
+        cell_lines = [f"[link={url}]{escape(title)}[/link]", f"[dim]{o.market.ticker}[/dim]"]
+        # Show the most recent matching headline directly under the trade.
+        if o.news_headlines:
+            top = o.news_headlines[0]
+            cell_lines.append(
+                f"[yellow]📰[/yellow] [link={escape(top.link)}]{escape(top.title[:90])}[/link] [dim]({escape(top.source)})[/dim]"
+            )
+        link_cell = Text.from_markup("\n".join(cell_lines))
         side_style = "green" if o.side == "NO" else "yellow"
+        news_cell = (
+            Text(str(len(o.news_headlines)), style="bold yellow")
+            if o.news_headlines else Text("·", style="dim")
+        )
         table.add_row(
             str(i),
             link_cell,
@@ -85,6 +95,7 @@ def render_rich_table(opportunities: Iterable[Opportunity]) -> Table:
             f"{o.annualized_roi:.0%}/yr",
             f"{o.kelly_fraction / 4:.1%}",
             f"{o.days_to_resolve:.0f}",
+            news_cell,
             o.rank_reason or o.prior.rationale,
         )
     return table
@@ -131,12 +142,32 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
         reason = escape(o.rank_reason or "")
         side_color = "#0a7a30" if o.side == "NO" else "#a36600"
         row_bg = "#ffffff" if i % 2 else "#fafafa"
+
+        news_block = ""
+        if o.news_headlines:
+            news_lines = []
+            for h in o.news_headlines:
+                news_lines.append(
+                    f'<div style="margin-top:4px; font-size:11px;">'
+                    f'<span style="color:#a36600;">📰</span> '
+                    f'<a href="{escape(h.link)}" style="color:#0a66c2; text-decoration:none;">{escape(h.title)}</a> '
+                    f'<span style="color:#888;">({escape(h.source)})</span>'
+                    f'</div>'
+                )
+            news_block = (
+                '<div style="margin-top:8px; padding:6px 8px; background:#fff8e6; '
+                'border-left:3px solid #f0c040; border-radius:2px;">'
+                + "".join(news_lines)
+                + '</div>'
+            )
+
         table += f"""      <tr style="background:{row_bg}; vertical-align:top;">
         <td style="border-bottom:1px solid #eee; color:#888; font-weight:700;">{i}</td>
         <td style="border-bottom:1px solid #eee;">
           <a href="{url}" style="color:#0a66c2; text-decoration:none; font-weight:600;">{title}</a><br>
           <span style="color:#888; font-family:monospace; font-size:11px;">{ticker}</span><br>
           <span style="color:#555; font-size:12px;">{rationale}</span>
+          {news_block}
         </td>
         <td style="border-bottom:1px solid #eee; color:{side_color}; font-weight:700;">{o.side}</td>
         <td style="border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums;">{o.cost:.2f}</td>

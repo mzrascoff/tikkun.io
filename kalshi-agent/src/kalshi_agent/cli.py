@@ -12,11 +12,12 @@ from rich.console import Console
 from .api import KalshiClient, Market
 from .filters import days_until
 from .mailer import EmailConfigError, send_html_email
+from .news import NewsContext, confidence_adjustment, fetch_news
 from .priors import estimate_prior
 from .report import render_html, render_markdown, render_rich_table
 from .scoring import Opportunity, evaluate, rank
 from .storage import Store
-from .watchlist import WATCHLIST
+from .watchlist import SERIES_BY_TICKER, WATCHLIST
 
 app = typer.Typer(help="Science-grounded Kalshi mispricing scanner.")
 console = Console()
@@ -52,9 +53,19 @@ def _run_scan(
     min_roi: float,
     min_days: float,
     min_oi: int,
-) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict]:
-    """Shared fetch+score loop. Returns (opportunities, series_log, diag)."""
+    news: bool = True,
+) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict, NewsContext]:
+    """Shared fetch+score loop. Returns (opportunities, series_log, diag, news_ctx)."""
     client = KalshiClient()
+    news_ctx = fetch_news() if news else NewsContext()
+    if news_ctx.headlines:
+        console.print(
+            f"[dim]Pulled {len(news_ctx.headlines)} headlines from "
+            f"{len(set(h.source for h in news_ctx.headlines))} feeds[/dim]"
+        )
+    if news_ctx.fetch_errors:
+        for src, err in news_ctx.fetch_errors.items():
+            console.print(f"[dim yellow]news warn {src}: {err}[/dim yellow]")
     opportunities: list[Opportunity] = []
     series_log: list[tuple[str, int, int, int]] = []
     diag: dict[str, list[dict]] = {}
@@ -108,9 +119,20 @@ def _run_scan(
                     continue
                 # tag with originating series so the renderer can build URLs
                 op = dataclasses.replace(op, series_ticker=series_ticker)
+                # Attach news pressure for this series.
+                series_meta = SERIES_BY_TICKER.get(series_ticker)
+                if series_meta and series_meta.news_keywords:
+                    matched = news_ctx.matching(list(series_meta.news_keywords))
+                    drag = confidence_adjustment(len(matched))
+                    op = dataclasses.replace(
+                        op,
+                        news_headlines=tuple(matched),
+                        news_confidence_drag=drag,
+                    )
                 row["side"] = op.side
                 row["edge"] = op.edge
                 row["roi"] = op.roi
+                row["news_hits"] = len(op.news_headlines)
                 if op.edge < min_edge or op.roi < min_roi:
                     row["verdict"] = "below_threshold"
                     continue
@@ -122,7 +144,7 @@ def _run_scan(
     finally:
         client.close()
 
-    return opportunities, series_log, diag
+    return opportunities, series_log, diag, news_ctx
 
 
 def _print_summary(
@@ -160,10 +182,11 @@ def scan(
     min_oi: int = typer.Option(0, help="Minimum open interest."),
     db: Path = typer.Option(DEFAULT_DB, help="SQLite database path."),
     persist: bool = typer.Option(True, help="Write results to the SQLite store."),
+    news: bool = typer.Option(True, "--news/--no-news", help="Pull RSS news pressure."),
 ) -> None:
     """Fetch each watchlist series, score, and print a pretty terminal table."""
-    opportunities, series_log, diag = _run_scan(
-        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
+    opportunities, series_log, diag, _news_ctx = _run_scan(
+        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi, news=news,
     )
     ranked = rank(opportunities)
     _print_summary(ranked, series_log, diag)
@@ -185,10 +208,11 @@ def report(
         help="Send the HTML report via SMTP using KALSHI_SMTP_* env vars.",
     ),
     persist: bool = typer.Option(True),
+    news: bool = typer.Option(True, "--news/--no-news"),
 ) -> None:
     """Run a scan and produce the daily report (terminal + optional email)."""
-    opportunities, series_log, diag = _run_scan(
-        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
+    opportunities, series_log, diag, _news_ctx = _run_scan(
+        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi, news=news,
     )
     ranked = rank(opportunities)
     _print_summary(ranked, series_log, diag)

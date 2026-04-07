@@ -37,6 +37,8 @@ class Opportunity:
     series_ticker: str = ""
     annualized_roi: float = 0.0
     rank_reason: str = ""
+    news_headlines: tuple = ()  # tuple[news.Headline, ...]
+    news_confidence_drag: float = 0.0  # how much we cut prior.confidence
 
 
 def _kelly(p: float, b: float) -> float:
@@ -141,9 +143,9 @@ def _scored(o: Opportunity) -> Opportunity:
     """Initial single-trade score (pre correlation pass).
 
     score = annualized_roi
-            * prior.confidence
-            * thin_edge_factor      (penalizes tiny gross ROIs)
-            * long_lockup_factor    (penalizes 2y+ capital lockups)
+            * effective_confidence       (prior.confidence - news drag)
+            * thin_edge_factor           (penalizes tiny gross ROIs)
+            * long_lockup_factor         (penalizes 2y+ capital lockups)
     """
     annualized = _annualize(o.roi, o.days_to_resolve)
 
@@ -158,7 +160,8 @@ def _scored(o: Opportunity) -> Opportunity:
         excess_years = (o.days_to_resolve - LONG_LOCKUP_DAYS) / 365.0
         long_lockup_factor = 0.5 ** excess_years
 
-    score = annualized * o.prior.confidence * thin_edge_factor * long_lockup_factor
+    effective_confidence = max(0.05, o.prior.confidence - o.news_confidence_drag)
+    score = annualized * effective_confidence * thin_edge_factor * long_lockup_factor
 
     return replace(o, score=score, annualized_roi=annualized)
 
@@ -174,7 +177,9 @@ def rank(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
       3. Re-sort by adjusted score.
       4. Compute and attach a human-readable rank_reason for each.
     """
-    opps = list(opportunities)
+    # Re-score each opportunity in case its news_confidence_drag was
+    # populated after the initial evaluate() call.
+    opps = [_scored(o) for o in opportunities]
     if not opps:
         return []
 
@@ -217,6 +222,8 @@ def rank(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
             reasons.append("thin edge — fees may eat it")
         if o.days_to_resolve > LONG_LOCKUP_DAYS:
             reasons.append("long capital lockup")
+        if o.news_confidence_drag > 0:
+            reasons.append(f"{len(o.news_headlines)} fresh news mention(s) — thesis is moving")
         if not reasons:
             reasons.append("solid risk-adjusted return")
         series_rank[o.series_ticker] = s_rank + 1
