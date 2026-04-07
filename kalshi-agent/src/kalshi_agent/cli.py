@@ -68,12 +68,21 @@ def scan(
     try:
         for series_ticker, label, _why in WATCHLIST:
             try:
-                markets = client.fetch_series(series_ticker)
+                stubs = client.fetch_series(series_ticker)
             except Exception as e:
                 if debug:
                     console.print(f"[red]ERR[/red] {series_ticker}: {e}")
                 series_log.append((series_ticker, 0, 0, 0))
+                diag[series_ticker] = []
                 continue
+
+            # The series endpoint returns metadata stubs with empty
+            # order books. Re-fetch each market individually for the
+            # live quote.
+            markets: list[Market] = []
+            for stub in stubs:
+                live = client.get_market(stub.ticker)
+                markets.append(live or stub)
 
             series_diag: list[dict] = []
             eligible = []

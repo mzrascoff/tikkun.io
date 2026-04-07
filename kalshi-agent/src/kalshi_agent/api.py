@@ -101,6 +101,25 @@ class KalshiClient:
             if not cursor or (max_pages is not None and pages >= max_pages):
                 return
 
+    def get_market(self, ticker: str) -> Market | None:
+        """Fetch a single market by ticker for live snapshot data.
+
+        The /markets list endpoint with a series filter returns
+        metadata stubs whose `yes_bid`/`yes_ask`/`volume` are zero.
+        The single-market endpoint returns the live order book.
+        """
+        self._throttle()
+        try:
+            resp = self._client.get(f"{self.base_url}/markets/{ticker}")
+            resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            return None
+        payload = resp.json()
+        raw = payload.get("market") or payload
+        if not raw:
+            return None
+        return Market.from_api(raw)
+
     def fetch_series(self, series_ticker: str) -> list[Market]:
         """Fetch all open markets in a series. Tries series_ticker first,
         then falls back to event_ticker (Kalshi accepts either depending
