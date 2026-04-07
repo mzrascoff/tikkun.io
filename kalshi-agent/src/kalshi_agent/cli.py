@@ -1,6 +1,8 @@
 """Typer CLI: `kalshi-agent scan`, `kalshi-agent grade`, `kalshi-agent brier`."""
 from __future__ import annotations
 
+import dataclasses
+import json
 from pathlib import Path
 
 import typer
@@ -61,6 +63,7 @@ def scan(
     store = Store(db) if persist else None
     opportunities = []
     series_log: list[tuple[str, int, int, int]] = []  # series, fetched, eligible, scored
+    diag: dict[str, list[dict]] = {}  # series -> list of per-market diagnostics
 
     try:
         for series_ticker, label, _why in WATCHLIST:
@@ -72,65 +75,62 @@ def scan(
                 series_log.append((series_ticker, 0, 0, 0))
                 continue
 
-            if debug:
-                console.print(f"\n[bold cyan]{series_ticker}[/bold cyan] -> {len(markets)} markets")
-                for m in markets:
-                    console.print(
-                        f"  {m.ticker}  status={m.status}  bid={m.yes_bid:.2f}  "
-                        f"ask={m.yes_ask:.2f}  oi={m.open_interest}  "
-                        f"close={m.close_time}  | {m.title}"
-                    )
-
+            series_diag: list[dict] = []
             eligible = []
             for m in markets:
+                row: dict = {**dataclasses.asdict(m)}
                 ok, reason = _eligible(m, min_days=min_days, min_oi=min_oi)
                 if not ok:
-                    if debug:
-                        console.print(f"    [red]drop[/red] {m.ticker}: {reason}")
+                    row["verdict"] = f"drop:{reason}"
+                    series_diag.append(row)
                     continue
                 eligible.append(m)
+                row["verdict"] = "eligible"
+                series_diag.append(row)
 
             scored = 0
             for m in eligible:
                 prior = estimate_prior(m)
+                row = next(r for r in series_diag if r["ticker"] == m.ticker)
                 if prior is None:
-                    if debug:
-                        console.print(
-                            f"    [yellow]no prior[/yellow] {m.ticker}: {m.title}"
-                        )
+                    row["verdict"] = "no_prior"
                     continue
+                row["prior_p"] = prior.probability
+                row["prior_rationale"] = prior.rationale
                 op = evaluate(m, prior)
                 if op is None:
-                    if debug:
-                        console.print(
-                            f"    [dim]no edge[/dim] {m.ticker}: prior={prior.probability:.2%} "
-                            f"vs ask={m.yes_ask:.2f} bid={m.yes_bid:.2f}"
-                        )
+                    row["verdict"] = "no_edge"
                     continue
+                row["side"] = op.side
+                row["edge"] = op.edge
+                row["roi"] = op.roi
                 if op.edge < min_edge or op.roi < min_roi:
-                    if debug:
-                        console.print(
-                            f"    [dim]below threshold[/dim] {m.ticker}: "
-                            f"side={op.side} edge={op.edge:+.2f} roi={op.roi:.1%}"
-                        )
+                    row["verdict"] = "below_threshold"
                     continue
+                row["verdict"] = "scored"
                 opportunities.append(op)
                 scored += 1
+            diag[series_ticker] = series_diag
             series_log.append((series_ticker, len(markets), len(eligible), scored))
     finally:
         client.close()
 
-    if debug:
-        console.print("\n[bold]Watchlist fetch summary[/bold]")
-        console.print(f"  {'series':<24} {'fetched':>8} {'eligible':>9} {'scored':>7}")
-        for s, f, e, sc in series_log:
-            console.print(f"  {s:<24} {f:>8} {e:>9} {sc:>7}")
+    # Always write the diagnostic dump so the user has something to share.
+    diag_path = Path("data/last-scan-debug.json")
+    diag_path.parent.mkdir(parents=True, exist_ok=True)
+    diag_path.write_text(json.dumps(diag, indent=2, default=str))
+
+    console.print("\n[bold]Watchlist fetch summary[/bold]")
+    console.print(f"  {'series':<24} {'fetched':>8} {'eligible':>9} {'scored':>7}")
+    for s, f, e, sc in series_log:
+        console.print(f"  {s:<24} {f:>8} {e:>9} {sc:>7}")
 
     total_fetched = sum(f for _, f, _, _ in series_log)
     console.print(
         f"\nFetched {total_fetched} markets across {len(WATCHLIST)} watchlist "
         f"series, surfaced {len(opportunities)} opportunities."
     )
+    console.print(f"[dim]Per-market diagnostic written to {diag_path}[/dim]")
     console.print(render_markdown(opportunities))
 
     if store and opportunities:
