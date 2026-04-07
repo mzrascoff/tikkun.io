@@ -14,13 +14,11 @@ import httpx
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
-# Fallback chain. Kalshi runs the regulated DCM under multiple hostnames;
-# the elections subdomain returns metadata stubs for non-political markets,
-# while trading-api / api carry the live order books.
+# Despite the name, api.elections.kalshi.com is the canonical host for
+# all Kalshi markets. trading-api.kalshi.com returns a migration notice
+# and api.kalshi.com does not resolve.
 BASE_URL_FALLBACKS = (
     "https://api.elections.kalshi.com/trade-api/v2",
-    "https://trading-api.kalshi.com/trade-api/v2",
-    "https://api.kalshi.com/trade-api/v2",
 )
 DEFAULT_UA = "kalshi-agent/0.1 (research; +https://github.com/mzrascoff/tikkun.io)"
 
@@ -39,13 +37,47 @@ class Market:
 
     @classmethod
     def from_api(cls, raw: dict) -> "Market":
+        """Parse a market from the Kalshi v2 API.
+
+        Handles two schemas:
+          * Legacy: yes_bid/yes_ask as ints in cents
+          * Current (2026): yes_bid_dollars/no_bid_dollars as strings in
+            dollars. yes_*/no_* are tied by yes_bid + no_ask = 1.0.
+        """
+        def _f(key: str) -> float:
+            v = raw.get(key)
+            if v is None or v == "":
+                return 0.0
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        # Prefer the new *_dollars fields.
+        yes_bid = _f("yes_bid_dollars")
+        yes_ask = _f("yes_ask_dollars")
+        no_bid = _f("no_bid_dollars")
+        no_ask = _f("no_ask_dollars")
+
+        # Derive missing yes-side from no-side: yes_bid + no_ask = 1.0,
+        # yes_ask + no_bid = 1.0.
+        if yes_bid == 0.0 and no_ask > 0.0:
+            yes_bid = round(1.0 - no_ask, 4)
+        if yes_ask == 0.0 and no_bid > 0.0:
+            yes_ask = round(1.0 - no_bid, 4)
+
+        # Legacy cents-int fallback.
+        if yes_bid == 0.0 and yes_ask == 0.0:
+            yes_bid = (raw.get("yes_bid") or 0) / 100.0
+            yes_ask = (raw.get("yes_ask") or 0) / 100.0
+
         return cls(
             ticker=raw["ticker"],
             title=raw.get("title", ""),
             category=raw.get("category", "") or "",
-            yes_bid=(raw.get("yes_bid") or 0) / 100.0,
-            yes_ask=(raw.get("yes_ask") or 0) / 100.0,
-            volume=raw.get("volume") or 0,
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            volume=raw.get("volume") or raw.get("volume_24h") or 0,
             open_interest=raw.get("open_interest") or 0,
             close_time=raw.get("close_time", ""),
             status=raw.get("status", ""),

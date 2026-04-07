@@ -82,6 +82,37 @@ def test_unmatched_title_yields_no_prior():
     assert estimate_prior(m, now=NOW) is None  # no keyword rule matches
 
 
+def test_market_from_api_new_dollars_schema():
+    """Kalshi 2026 schema: *_dollars strings, derive yes from no."""
+    raw = {
+        "ticker": "KXALIENS-27",
+        "title": "Will the U.S. confirm that aliens exist before 2027?",
+        "close_time": "2027-01-01T15:00:00Z",
+        "status": "active",
+        "no_bid_dollars": "0.7920",
+        "no_ask_dollars": "0.7940",
+        "last_price_dollars": "0.2080",
+    }
+    m = Market.from_api(raw)
+    assert m.ticker == "KXALIENS-27"
+    assert abs(m.yes_bid - 0.206) < 0.001  # 1 - no_ask
+    assert abs(m.yes_ask - 0.208) < 0.001  # 1 - no_bid
+
+
+def test_market_from_api_legacy_cents_schema():
+    raw = {
+        "ticker": "KX-LEGACY",
+        "title": "x",
+        "close_time": "2027-01-01T00:00:00Z",
+        "status": "open",
+        "yes_bid": 14,
+        "yes_ask": 16,
+    }
+    m = Market.from_api(raw)
+    assert abs(m.yes_bid - 0.14) < 1e-9
+    assert abs(m.yes_ask - 0.16) < 1e-9
+
+
 def test_iran_nuclear_weapon_prior():
     m = _market(
         title="Will Iran acquire a nuclear weapon before 2027?",
