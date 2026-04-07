@@ -12,6 +12,27 @@ from .scoring import Opportunity
 from .watchlist import trade_url
 
 
+def _signal_line(*, icon: str, icon_color: str, primary_html: str, secondary: str) -> str:
+    return (
+        f'<div style="margin-top:4px; font-size:11px;">'
+        f'<span style="color:{icon_color};">{icon}</span> '
+        f'{primary_html} '
+        f'<span style="color:#888;">{escape(secondary)}</span>'
+        f'</div>'
+    )
+
+
+def _side_panel(lines: list[str], *, bg: str, border: str) -> str:
+    if not lines:
+        return ""
+    return (
+        f'<div style="margin-top:8px; padding:6px 8px; background:{bg}; '
+        f'border-left:3px solid {border}; border-radius:2px;">'
+        + "".join(lines)
+        + "</div>"
+    )
+
+
 def _ordered(opps: Iterable[Opportunity]) -> list[Opportunity]:
     """Trust the input order if it looks pre-ranked (rank() populates
     rank_reason); otherwise fall back to sorting by score."""
@@ -83,6 +104,12 @@ def render_rich_table(opportunities: Iterable[Opportunity]) -> Table:
             cell_lines.append(
                 f"[yellow]📰[/yellow] [link={escape(top.link)}]{escape(top.title[:90])}[/link] [dim]({escape(top.source)})[/dim]"
             )
+        # Show the most recent matching inbox subject.
+        if o.email_mentions:
+            top_email = o.email_mentions[0]
+            cell_lines.append(
+                f"[blue]📧[/blue] {escape(top_email.subject[:90])} [dim]({escape(top_email.sender[:40])})[/dim]"
+            )
         link_cell = Text.from_markup("\n".join(cell_lines))
         side_style = "green" if o.side == "NO" else "yellow"
         news_cell = (
@@ -150,23 +177,27 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
         venue_color = "#7c2db5" if o.venue == "polymarket" else "#0a66c2"
         venue_label = escape(o.venue)
 
-        news_block = ""
-        if o.news_headlines:
-            news_lines = []
-            for h in o.news_headlines:
-                news_lines.append(
-                    f'<div style="margin-top:4px; font-size:11px;">'
-                    f'<span style="color:#a36600;">📰</span> '
-                    f'<a href="{escape(h.link)}" style="color:#0a66c2; text-decoration:none;">{escape(h.title)}</a> '
-                    f'<span style="color:#888;">({escape(h.source)})</span>'
-                    f'</div>'
-                )
-            news_block = (
-                '<div style="margin-top:8px; padding:6px 8px; background:#fff8e6; '
-                'border-left:3px solid #f0c040; border-radius:2px;">'
-                + "".join(news_lines)
-                + '</div>'
+        news_lines = [
+            _signal_line(
+                icon="📰",
+                icon_color="#a36600",
+                primary_html=f'<a href="{escape(h.link)}" style="color:#0a66c2; text-decoration:none;">{escape(h.title)}</a>',
+                secondary=f"({h.source})",
             )
+            for h in o.news_headlines
+        ]
+        news_block = _side_panel(news_lines, bg="#fff8e6", border="#f0c040")
+
+        inbox_lines = [
+            _signal_line(
+                icon="📧",
+                icon_color="#0a66c2",
+                primary_html=f"<strong>{escape(em.subject)}</strong>",
+                secondary=f"— {em.sender}",
+            )
+            for em in o.email_mentions
+        ]
+        inbox_block = _side_panel(inbox_lines, bg="#eef4ff", border="#4a8df0")
 
         table += f"""      <tr style="background:{row_bg}; vertical-align:top;">
         <td style="border-bottom:1px solid #eee; color:#888; font-weight:700;">{i}</td>
@@ -178,6 +209,7 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
           <span style="color:#888; font-family:monospace; font-size:11px;">{ticker}</span><br>
           <span style="color:#555; font-size:12px;">{rationale}</span>
           {news_block}
+          {inbox_block}
         </td>
         <td style="border-bottom:1px solid #eee; color:{side_color}; font-weight:700;">{o.side}</td>
         <td style="border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums;">{o.cost:.2f}</td>

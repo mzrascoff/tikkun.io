@@ -106,6 +106,49 @@ kalshi-agent scan --no-polymarket    # Kalshi only
 kalshi-agent scan                    # both venues, default
 ```
 
+## Inbox signal (read-only IMAP)
+
+The agent can also scan your **personal inbox** for fresh signal each
+morning, using read-only IMAP. Newsletter mentions, friends' tips,
+exchange alerts — anything you're already paying attention to is a
+strong indicator that the *price* of a thesis is moving on flow that
+the static science prior cannot see. The agent demotes those trades
+in the ranker (without touching the underlying probability) and shows
+the matching subjects right next to the trade in the report.
+
+### Privacy guarantees (read these)
+
+- **Read-only.** The agent opens INBOX with `readonly=True`. It
+  never sends, deletes, marks-read, forwards, or modifies any message.
+- **No bodies are persisted.** Only the sender, subject, and the
+  first 120 characters of the body of *matching* messages appear in
+  the diagnostic JSON or the report. Full bodies are dropped after
+  matching.
+- **Credentials live in env vars** (`KALSHI_IMAP_*`), never in the
+  diagnostic dump or any log file.
+- Default lookback is 3 days, capped at 200 messages per scan.
+- Skip the inbox scan with `--no-inbox`.
+
+### Setup
+
+1. Enable IMAP in Gmail settings, then create an [app
+   password](https://myaccount.google.com/apppasswords) (the same
+   one you use for the SMTP daily-report sender works fine — Gmail
+   app passwords are valid for both protocols).
+2. Add the `KALSHI_IMAP_*` block to your launchd plist (see
+   `scripts/com.mrascoff.kalshi-agent.plist` for the template).
+3. Test on demand:
+
+```bash
+KALSHI_IMAP_HOST=imap.gmail.com \
+KALSHI_IMAP_USER=you@gmail.com \
+KALSHI_IMAP_PASS='your_app_password' \
+kalshi-agent scan
+```
+
+If your inbox has a relevant message, you'll see a `📧` indicator on
+that row in the terminal table and a blue inbox block in the email.
+
 ## News analysis
 
 Each morning's scan also pulls public RSS feeds from the New York
@@ -152,6 +195,7 @@ src/kalshi_agent/
   watchlist.py    # curated Kalshi series + venue-aware URL builder
   priors.py       # venue-agnostic base-rate table for science claims
   news.py         # FT / NYT / WSJ RSS reader + matching
+  email_reader.py # READ-ONLY IMAP inbox scanner for personal signal
   scoring.py      # edge, Kelly, annualized ROI, multi-venue ranker
   storage.py      # SQLite persistence + run history
   report.py       # rich + markdown + HTML renderers with venue badge

@@ -63,6 +63,25 @@
         <string>YOUR_GMAIL@gmail.com</string>
         <key>KALSHI_EMAIL_TO</key>
         <string>YOUR_INBOX@example.com</string>
+
+        <!-- READ-ONLY IMAP for inbox signal scanning. The agent never
+             sends, deletes, marks-read, or modifies any message. Use
+             the same Gmail app password as the SMTP block above; you
+             do not need a second one. -->
+        <key>KALSHI_IMAP_HOST</key>
+        <string>imap.gmail.com</string>
+        <key>KALSHI_IMAP_PORT</key>
+        <string>993</string>
+        <key>KALSHI_IMAP_USER</key>
+        <string>YOUR_GMAIL@gmail.com</string>
+        <key>KALSHI_IMAP_PASS</key>
+        <string>YOUR_GMAIL_APP_PASSWORD</string>
+        <key>KALSHI_IMAP_FOLDER</key>
+        <string>INBOX</string>
+        <key>KALSHI_IMAP_LOOKBACK_DAYS</key>
+        <string>3</string>
+        <key>KALSHI_IMAP_MAX_MESSAGES</key>
+        <string>200</string>
     </dict>
 
     <key>StandardOutPath</key>

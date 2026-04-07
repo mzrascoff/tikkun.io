@@ -40,6 +40,8 @@ class Opportunity:
     news_headlines: tuple = ()  # tuple[news.Headline, ...]
     news_confidence_drag: float = 0.0  # how much we cut prior.confidence
     venue: str = "kalshi"  # "kalshi" or "polymarket"
+    email_mentions: tuple = ()  # tuple[email_reader.EmailItem, ...]
+    email_confidence_drag: float = 0.0
 
 
 def _kelly(p: float, b: float) -> float:
@@ -161,7 +163,10 @@ def _scored(o: Opportunity) -> Opportunity:
         excess_years = (o.days_to_resolve - LONG_LOCKUP_DAYS) / 365.0
         long_lockup_factor = 0.5 ** excess_years
 
-    effective_confidence = max(0.05, o.prior.confidence - o.news_confidence_drag)
+    effective_confidence = max(
+        0.05,
+        o.prior.confidence - o.news_confidence_drag - o.email_confidence_drag,
+    )
     score = annualized * effective_confidence * thin_edge_factor * long_lockup_factor
 
     return replace(o, score=score, annualized_roi=annualized)
@@ -225,6 +230,8 @@ def rank(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
             reasons.append("long capital lockup")
         if o.news_confidence_drag > 0:
             reasons.append(f"{len(o.news_headlines)} fresh news mention(s) — thesis is moving")
+        if o.email_confidence_drag > 0:
+            reasons.append(f"{len(o.email_mentions)} inbox mention(s) — you're already watching this")
         if not reasons:
             reasons.append("solid risk-adjusted return")
         series_rank[o.series_ticker] = s_rank + 1

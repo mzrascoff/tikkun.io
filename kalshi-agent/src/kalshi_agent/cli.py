@@ -10,6 +10,7 @@ import typer
 from rich.console import Console
 
 from .api import KalshiClient, Market
+from .email_reader import EmailContext, email_confidence_adjustment, fetch_emails
 from .filters import days_until
 from .mailer import EmailConfigError, send_html_email
 from .news import NewsContext, confidence_adjustment, fetch_news
@@ -31,6 +32,30 @@ DEFAULT_DB = Path("data/kalshi.sqlite")
 
 
 CLOSED_STATUSES = {"closed", "settled", "finalized", "determined"}
+
+
+def _attach_signals(
+    op: Opportunity,
+    series_ticker: str,
+    matched_news: list,
+    matched_emails: list,
+) -> Opportunity:
+    """Tag an opportunity with its originating series plus any matched
+    news headlines and inbox mentions for that series."""
+    op = dataclasses.replace(op, series_ticker=series_ticker)
+    if matched_news:
+        op = dataclasses.replace(
+            op,
+            news_headlines=tuple(matched_news),
+            news_confidence_drag=confidence_adjustment(len(matched_news)),
+        )
+    if matched_emails:
+        op = dataclasses.replace(
+            op,
+            email_mentions=tuple(matched_emails),
+            email_confidence_drag=email_confidence_adjustment(len(matched_emails)),
+        )
+    return op
 
 
 def _eligible(m: Market, *, min_days: float, min_oi: int) -> tuple[bool, str]:
@@ -60,6 +85,7 @@ def _run_scan(
     min_oi: int,
     news: bool = True,
     polymarket: bool = True,
+    inbox: bool = True,
 ) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict, NewsContext]:
     """Shared fetch+score loop. Returns (opportunities, series_log, diag, news_ctx)."""
     client = KalshiClient()
@@ -72,6 +98,13 @@ def _run_scan(
     if news_ctx.fetch_errors:
         for src, err in news_ctx.fetch_errors.items():
             console.print(f"[dim yellow]news warn {src}: {err}[/dim yellow]")
+
+    email_ctx = fetch_emails() if inbox else EmailContext()
+    if email_ctx.items:
+        console.print(f"[dim]Scanned {len(email_ctx.items)} recent emails (read-only)[/dim]")
+    if email_ctx.fetch_error:
+        console.print(f"[dim yellow]inbox warn: {email_ctx.fetch_error}[/dim yellow]")
+
     opportunities: list[Opportunity] = []
     series_log: list[tuple[str, int, int, int]] = []
     diag: dict[str, list[dict]] = {}
@@ -110,6 +143,13 @@ def _run_scan(
                 row["verdict"] = "eligible"
                 series_diag.append(row)
 
+            # Per-series signal lookup is invariant across the markets
+            # in the series, so compute it once before the loop.
+            series_meta = SERIES_BY_TICKER.get(series_ticker)
+            kws = list(series_meta.news_keywords) if series_meta else []
+            series_news = news_ctx.matching(kws) if kws else []
+            series_emails = email_ctx.matching(kws) if kws else []
+
             scored = 0
             for m in eligible:
                 prior = estimate_prior(m)
@@ -123,22 +163,12 @@ def _run_scan(
                 if op is None:
                     row["verdict"] = "no_edge"
                     continue
-                # tag with originating series so the renderer can build URLs
-                op = dataclasses.replace(op, series_ticker=series_ticker)
-                # Attach news pressure for this series.
-                series_meta = SERIES_BY_TICKER.get(series_ticker)
-                if series_meta and series_meta.news_keywords:
-                    matched = news_ctx.matching(list(series_meta.news_keywords))
-                    drag = confidence_adjustment(len(matched))
-                    op = dataclasses.replace(
-                        op,
-                        news_headlines=tuple(matched),
-                        news_confidence_drag=drag,
-                    )
+                op = _attach_signals(op, series_ticker, series_news, series_emails)
                 row["side"] = op.side
                 row["edge"] = op.edge
                 row["roi"] = op.roi
                 row["news_hits"] = len(op.news_headlines)
+                row["email_hits"] = len(op.email_mentions)
                 if op.edge < min_edge or op.roi < min_roi:
                     row["verdict"] = "below_threshold"
                     continue
@@ -178,20 +208,14 @@ def _run_scan(
                     row["verdict"] = "no_edge"
                     poly_diag.append(row)
                     continue
-                op = dataclasses.replace(
+                op = dataclasses.replace(op, venue="polymarket")
+                kw_list = list(kws.news_keywords)
+                op = _attach_signals(
                     op,
-                    venue="polymarket",
-                    series_ticker=m.ticker,  # use slug as series identifier
+                    series_ticker=m.ticker,  # polymarket uses the slug as the series identifier
+                    matched_news=news_ctx.matching(kw_list) if kw_list else [],
+                    matched_emails=email_ctx.matching(kw_list) if kw_list else [],
                 )
-                # News pressure
-                if kws.news_keywords:
-                    matched_news = news_ctx.matching(list(kws.news_keywords))
-                    drag = confidence_adjustment(len(matched_news))
-                    op = dataclasses.replace(
-                        op,
-                        news_headlines=tuple(matched_news),
-                        news_confidence_drag=drag,
-                    )
                 if op.edge < min_edge or op.roi < min_roi:
                     row["verdict"] = "below_threshold"
                     row["roi"] = op.roi
@@ -252,11 +276,13 @@ def scan(
     news: bool = typer.Option(True, "--news/--no-news", help="Pull RSS news pressure."),
     polymarket: bool = typer.Option(True, "--polymarket/--no-polymarket",
                                     help="Also scan Polymarket alongside Kalshi."),
+    inbox: bool = typer.Option(True, "--inbox/--no-inbox",
+                               help="Read recent inbox via IMAP for additional signal."),
 ) -> None:
     """Fetch each watchlist series, score, and print a pretty terminal table."""
     opportunities, series_log, diag, _news_ctx = _run_scan(
         min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
-        news=news, polymarket=polymarket,
+        news=news, polymarket=polymarket, inbox=inbox,
     )
     ranked = rank(opportunities)
     _print_summary(ranked, series_log, diag)
@@ -280,11 +306,12 @@ def report(
     persist: bool = typer.Option(True),
     news: bool = typer.Option(True, "--news/--no-news"),
     polymarket: bool = typer.Option(True, "--polymarket/--no-polymarket"),
+    inbox: bool = typer.Option(True, "--inbox/--no-inbox"),
 ) -> None:
     """Run a scan and produce the daily report (terminal + optional email)."""
     opportunities, series_log, diag, _news_ctx = _run_scan(
         min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
-        news=news, polymarket=polymarket,
+        news=news, polymarket=polymarket, inbox=inbox,
     )
     ranked = rank(opportunities)
     _print_summary(ranked, series_log, diag)
