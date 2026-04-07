@@ -82,6 +82,32 @@ def test_unmatched_title_yields_no_prior():
     assert estimate_prior(m, now=NOW) is None  # no keyword rule matches
 
 
+def test_iran_nuclear_weapon_prior():
+    m = _market(
+        title="Will Iran acquire a nuclear weapon before 2027?",
+        yes_bid=8,
+        yes_ask=10,
+    )
+    prior = estimate_prior(m, now=NOW)
+    assert prior is not None
+    assert prior.probability < 0.10  # ~3-4% over <1y
+    op = evaluate(m, prior, now=NOW)
+    assert op is not None and op.side == "NO"
+
+
+def test_iran_nuclear_deal_prior():
+    m = _market(
+        title="New US-Iran nuclear deal this year?",
+        yes_bid=33,
+        yes_ask=35,
+    )
+    prior = estimate_prior(m, now=NOW)
+    assert prior is not None
+    assert prior.probability < 0.20
+    op = evaluate(m, prior, now=NOW)
+    assert op is not None and op.side == "NO"
+
+
 def test_room_temp_superconductor_prior():
     m = _market(
         title="Room-temp superconductor validated this year?",

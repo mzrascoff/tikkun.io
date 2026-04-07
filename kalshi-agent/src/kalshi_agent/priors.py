@@ -146,6 +146,45 @@ def _cancer_alz_cure(m: Market, now: datetime | None = None) -> Prior | None:
     )
 
 
+def _iran_nuclear_weapon(m: Market, now: datetime | None = None) -> Prior | None:
+    if not re.search(r"iran", m.title, re.I):
+        return None
+    if not re.search(r"nuclear weapon|nuke|warhead|weaponiz", m.title, re.I):
+        return None
+    yrs = _years_to_close(m, now)
+    # Weaponization (not enrichment) is the gating step. IAEA monitoring
+    # plus historical breakout-to-weapon timelines put the per-year
+    # hazard at ~3-5%. Use 4%.
+    p = _annualized(0.04, yrs)
+    return Prior(
+        probability=p,
+        rationale=(
+            "Weaponization (not enrichment) gates this. "
+            f"Hazard ~4%/yr -> ~{p:.1%} over {yrs:.2f}y."
+        ),
+        confidence=0.55,
+    )
+
+
+def _iran_nuclear_deal(m: Market, now: datetime | None = None) -> Prior | None:
+    if not re.search(r"iran", m.title, re.I):
+        return None
+    if not re.search(r"nuclear deal|agreement|JCPOA|treaty", m.title, re.I):
+        return None
+    yrs = _years_to_close(m, now)
+    # Negotiated nuclear agreements within ~1y of active conflict are
+    # historically rare. ~10%/yr.
+    p = _annualized(0.10, yrs)
+    return Prior(
+        probability=p,
+        rationale=(
+            "Negotiated nuclear deals are historically rare in <1y windows. "
+            f"Hazard ~10%/yr -> ~{p:.1%} over {yrs:.2f}y."
+        ),
+        confidence=0.5,
+    )
+
+
 # Order matters: more specific rules first.
 RULES = (
     _alien_disclosure,
@@ -154,6 +193,8 @@ RULES = (
     _mars_humans,
     _commercial_fusion,
     _cancer_alz_cure,
+    _iran_nuclear_weapon,
+    _iran_nuclear_deal,
 )
 
 

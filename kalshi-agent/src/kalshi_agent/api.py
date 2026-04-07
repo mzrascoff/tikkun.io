@@ -72,8 +72,14 @@ class KalshiClient:
         status: str = "open",
         page_size: int = 200,
         max_pages: int | None = None,
+        series_ticker: str | None = None,
+        event_ticker: str | None = None,
     ) -> Iterator[Market]:
-        """Yield markets, paginating via the cursor returned by Kalshi."""
+        """Yield markets, paginating via the cursor returned by Kalshi.
+
+        If `series_ticker` or `event_ticker` is given, the query is
+        narrowed to that group. Otherwise the full firehose is returned.
+        """
         cursor: str | None = None
         pages = 0
         while True:
@@ -81,6 +87,10 @@ class KalshiClient:
             params: dict[str, str | int] = {"status": status, "limit": page_size}
             if cursor:
                 params["cursor"] = cursor
+            if series_ticker:
+                params["series_ticker"] = series_ticker
+            if event_ticker:
+                params["event_ticker"] = event_ticker
             resp = self._client.get(f"{self.base_url}/markets", params=params)
             resp.raise_for_status()
             payload = resp.json()
@@ -90,6 +100,27 @@ class KalshiClient:
             pages += 1
             if not cursor or (max_pages is not None and pages >= max_pages):
                 return
+
+    def fetch_series(self, series_ticker: str) -> list[Market]:
+        """Fetch all open markets in a series. Tries series_ticker first,
+        then falls back to event_ticker (Kalshi accepts either depending
+        on how the URL was constructed)."""
+        # Try as series first
+        try:
+            markets = list(
+                self.iter_markets(series_ticker=series_ticker, max_pages=5)
+            )
+            if markets:
+                return markets
+        except httpx.HTTPStatusError:
+            pass
+        # Fallback: try as event ticker (some URLs use event tickers)
+        try:
+            return list(
+                self.iter_markets(event_ticker=series_ticker, max_pages=5)
+            )
+        except httpx.HTTPStatusError:
+            return []
 
     def close(self) -> None:
         self._client.close()
