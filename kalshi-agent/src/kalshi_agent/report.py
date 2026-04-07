@@ -27,15 +27,15 @@ def render_markdown(opportunities: Iterable[Opportunity]) -> str:
     if not rows:
         return "_No opportunities found._"
     lines = [
-        "| # | Ticker | Title | Side | Cost | ROI | Annualized | Days | Why this rank | Link |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| # | Venue | Ticker | Title | Side | Cost | ROI | Annualized | Days | Why this rank | Link |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for i, o in enumerate(rows, 1):
         title = (o.market.title or o.market.ticker).replace("|", "\\|")
-        url = trade_url(o.series_ticker, o.market.ticker)
+        url = trade_url(o.series_ticker, o.market.ticker, o.venue)
         reason = (o.rank_reason or "").replace("|", "\\|")
         lines.append(
-            f"| {i} | `{o.market.ticker}` | {title} | **{o.side}** | "
+            f"| {i} | {o.venue} | `{o.market.ticker}` | {title} | **{o.side}** | "
             f"{o.cost:.2f} | {o.roi:.1%} | {o.annualized_roi:.0%}/yr | "
             f"{o.days_to_resolve:.0f} | {reason} | [trade]({url}) |"
         )
@@ -56,6 +56,7 @@ def render_rich_table(opportunities: Iterable[Opportunity]) -> Table:
         expand=True,
     )
     table.add_column("#", justify="right", style="dim", width=3)
+    table.add_column("Venue", justify="center", width=10)
     table.add_column("Trade", style="bold cyan", overflow="fold")
     table.add_column("Side", justify="center", width=4)
     table.add_column("Cost", justify="right", width=6)
@@ -67,12 +68,14 @@ def render_rich_table(opportunities: Iterable[Opportunity]) -> Table:
     table.add_column("Why this rank", overflow="fold")
 
     if not rows:
-        table.add_row("—", "No opportunities found", "", "", "", "", "", "", "", "")
+        table.add_row("—", "", "No opportunities found", "", "", "", "", "", "", "", "")
         return table
 
     for i, o in enumerate(rows, 1):
-        url = trade_url(o.series_ticker, o.market.ticker)
+        url = trade_url(o.series_ticker, o.market.ticker, o.venue)
         title = o.market.title or o.market.ticker
+        venue_color = "magenta" if o.venue == "polymarket" else "cyan"
+        venue_cell = Text(o.venue, style=f"bold {venue_color}")
         cell_lines = [f"[link={url}]{escape(title)}[/link]", f"[dim]{o.market.ticker}[/dim]"]
         # Show the most recent matching headline directly under the trade.
         if o.news_headlines:
@@ -88,6 +91,7 @@ def render_rich_table(opportunities: Iterable[Opportunity]) -> Table:
         )
         table.add_row(
             str(i),
+            venue_cell,
             link_cell,
             Text(o.side, style=side_style),
             f"{o.cost:.2f}",
@@ -122,6 +126,7 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
     <thead>
       <tr style="background:#f4f4f6; text-align:left;">
         <th style="border-bottom:2px solid #ddd;">#</th>
+        <th style="border-bottom:2px solid #ddd;">Venue</th>
         <th style="border-bottom:2px solid #ddd;">Trade</th>
         <th style="border-bottom:2px solid #ddd;">Side</th>
         <th style="border-bottom:2px solid #ddd; text-align:right;">Cost</th>
@@ -135,13 +140,15 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
     <tbody>
 """
     for i, o in enumerate(rows, 1):
-        url = trade_url(o.series_ticker, o.market.ticker)
+        url = trade_url(o.series_ticker, o.market.ticker, o.venue)
         title = escape(o.market.title or o.market.ticker)
         ticker = escape(o.market.ticker)
         rationale = escape(o.prior.rationale)
         reason = escape(o.rank_reason or "")
         side_color = "#0a7a30" if o.side == "NO" else "#a36600"
         row_bg = "#ffffff" if i % 2 else "#fafafa"
+        venue_color = "#7c2db5" if o.venue == "polymarket" else "#0a66c2"
+        venue_label = escape(o.venue)
 
         news_block = ""
         if o.news_headlines:
@@ -163,6 +170,9 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
 
         table += f"""      <tr style="background:{row_bg}; vertical-align:top;">
         <td style="border-bottom:1px solid #eee; color:#888; font-weight:700;">{i}</td>
+        <td style="border-bottom:1px solid #eee;">
+          <span style="display:inline-block; padding:2px 8px; border-radius:10px; background:{venue_color}; color:#fff; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px;">{venue_label}</span>
+        </td>
         <td style="border-bottom:1px solid #eee;">
           <a href="{url}" style="color:#0a66c2; text-decoration:none; font-weight:600;">{title}</a><br>
           <span style="color:#888; font-family:monospace; font-size:11px;">{ticker}</span><br>

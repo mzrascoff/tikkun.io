@@ -39,6 +39,7 @@ class Opportunity:
     rank_reason: str = ""
     news_headlines: tuple = ()  # tuple[news.Headline, ...]
     news_confidence_drag: float = 0.0  # how much we cut prior.confidence
+    venue: str = "kalshi"  # "kalshi" or "polymarket"
 
 
 def _kelly(p: float, b: float) -> float:

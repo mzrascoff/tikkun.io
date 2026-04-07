@@ -89,8 +89,12 @@ WATCHLIST: tuple[Series, ...] = (
 SERIES_BY_TICKER: dict[str, Series] = {s.ticker: s for s in WATCHLIST}
 
 
-def trade_url(series_ticker: str, market_ticker: str) -> str:
-    """Build a direct trade-page URL for a specific market."""
+def trade_url(series_ticker: str, market_ticker: str, venue: str = "kalshi") -> str:
+    """Build a direct trade-page URL for a specific market on the given venue."""
+    if venue == "polymarket":
+        # Polymarket uses one URL per market slug; the slug is stored
+        # as the Market.ticker for polymarket-sourced opportunities.
+        return f"https://polymarket.com/market/{market_ticker}"
     series = SERIES_BY_TICKER.get(series_ticker)
     if series is None:
         return f"https://kalshi.com/markets/{series_ticker.lower()}"

@@ -74,6 +74,38 @@ The job will fire every day at 07:00 local time and email you the
 ranked report. Each row in the email links directly to the Kalshi trade
 page for that contract.
 
+## Polymarket support
+
+The same scan also pulls **Polymarket** in parallel via the public
+gamma API (`https://gamma-api.polymarket.com`). No auth required.
+
+For each active binary YES/NO market on Polymarket, the agent:
+
+1. Filters by question-text regex against the curated keyword groups
+   in `polymarket.POLYMARKET_WATCHLIST` (alien disclosure, OpenAI/AGI,
+   crewed Mars, room-temp superconductor, commercial fusion, disease
+   cures, Iran nuclear weapon, Iran nuclear deal).
+2. Runs the same `priors.estimate_prior()` and `scoring.evaluate()`
+   that Kalshi markets use — the priors are keyword-matched on titles,
+   not venue-specific identifiers.
+3. Applies a smaller **fee drag of 0.5%** instead of Kalshi's 2%
+   (Polymarket has no taker fees; the 0.5% covers spread only).
+4. Tags the resulting `Opportunity` with `venue="polymarket"`.
+
+Both venues' opportunities go into the same `rank()` call, so the
+final daily report is a unified, best-to-worst list across both
+exchanges. The terminal table and HTML email both show a colored
+**Venue** badge for each row, and the trade link points to either
+`kalshi.com/markets/...` or `polymarket.com/market/...` automatically.
+
+Skip Polymarket with `--no-polymarket` (e.g. when running offline or
+when you only want Kalshi's regulated markets).
+
+```bash
+kalshi-agent scan --no-polymarket    # Kalshi only
+kalshi-agent scan                    # both venues, default
+```
+
 ## News analysis
 
 Each morning's scan also pulls public RSS feeds from the New York
@@ -115,13 +147,14 @@ kalshi-agent report --no-news
 src/kalshi_agent/
   __init__.py
   api.py          # Kalshi REST client (read-only, no auth needed)
+  polymarket.py   # Polymarket gamma API client + watchlist + filter
   filters.py      # tail-price + liquidity filtering
-  watchlist.py    # curated series + URL builder + news keywords
-  priors.py       # base-rate table for science/tech claims
+  watchlist.py    # curated Kalshi series + venue-aware URL builder
+  priors.py       # venue-agnostic base-rate table for science claims
   news.py         # FT / NYT / WSJ RSS reader + matching
-  scoring.py      # edge, Kelly, annualized ROI, ranker
+  scoring.py      # edge, Kelly, annualized ROI, multi-venue ranker
   storage.py      # SQLite persistence + run history
-  report.py       # rich + markdown + HTML renderers
+  report.py       # rich + markdown + HTML renderers with venue badge
   mailer.py       # SMTP email sender for daily report
   cli.py          # `kalshi-agent` entry point
 scripts/

@@ -13,6 +13,11 @@ from .api import KalshiClient, Market
 from .filters import days_until
 from .mailer import EmailConfigError, send_html_email
 from .news import NewsContext, confidence_adjustment, fetch_news
+from .polymarket import (
+    POLYMARKET_FEE_DRAG,
+    PolymarketClient,
+    filter_by_watchlist as poly_filter,
+)
 from .priors import estimate_prior
 from .report import render_html, render_markdown, render_rich_table
 from .scoring import Opportunity, evaluate, rank
@@ -54,6 +59,7 @@ def _run_scan(
     min_days: float,
     min_oi: int,
     news: bool = True,
+    polymarket: bool = True,
 ) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict, NewsContext]:
     """Shared fetch+score loop. Returns (opportunities, series_log, diag, news_ctx)."""
     client = KalshiClient()
@@ -144,6 +150,67 @@ def _run_scan(
     finally:
         client.close()
 
+    # ----- Polymarket pass -----
+    poly_log: tuple[int, int, int] = (0, 0, 0)  # fetched, eligible, scored
+    if polymarket:
+        poly_client = PolymarketClient()
+        try:
+            fetched = list(poly_client.fetch_active_markets(max_pages=10))
+            poly_diag: list[dict] = []
+            matches = poly_filter(fetched)
+            poly_eligible = 0
+            poly_scored = 0
+            for m, kws in matches:
+                row: dict = {**dataclasses.asdict(m), "watchlist": kws.label}
+                ok, reason = _eligible(m, min_days=min_days, min_oi=min_oi)
+                if not ok:
+                    row["verdict"] = f"drop:{reason}"
+                    poly_diag.append(row)
+                    continue
+                poly_eligible += 1
+                prior = estimate_prior(m)
+                if prior is None:
+                    row["verdict"] = "no_prior"
+                    poly_diag.append(row)
+                    continue
+                op = evaluate(m, prior, fee_drag=POLYMARKET_FEE_DRAG)
+                if op is None:
+                    row["verdict"] = "no_edge"
+                    poly_diag.append(row)
+                    continue
+                op = dataclasses.replace(
+                    op,
+                    venue="polymarket",
+                    series_ticker=m.ticker,  # use slug as series identifier
+                )
+                # News pressure
+                if kws.news_keywords:
+                    matched_news = news_ctx.matching(list(kws.news_keywords))
+                    drag = confidence_adjustment(len(matched_news))
+                    op = dataclasses.replace(
+                        op,
+                        news_headlines=tuple(matched_news),
+                        news_confidence_drag=drag,
+                    )
+                if op.edge < min_edge or op.roi < min_roi:
+                    row["verdict"] = "below_threshold"
+                    row["roi"] = op.roi
+                    poly_diag.append(row)
+                    continue
+                row["verdict"] = "scored"
+                row["roi"] = op.roi
+                row["side"] = op.side
+                poly_diag.append(row)
+                opportunities.append(op)
+                poly_scored += 1
+            poly_log = (len(fetched), poly_eligible, poly_scored)
+            diag["__polymarket__"] = poly_diag
+        finally:
+            poly_client.close()
+
+    # Tag the polymarket pass into series_log so the summary table renders it.
+    series_log.append(("POLYMARKET", *poly_log))
+
     return opportunities, series_log, diag, news_ctx
 
 
@@ -183,10 +250,13 @@ def scan(
     db: Path = typer.Option(DEFAULT_DB, help="SQLite database path."),
     persist: bool = typer.Option(True, help="Write results to the SQLite store."),
     news: bool = typer.Option(True, "--news/--no-news", help="Pull RSS news pressure."),
+    polymarket: bool = typer.Option(True, "--polymarket/--no-polymarket",
+                                    help="Also scan Polymarket alongside Kalshi."),
 ) -> None:
     """Fetch each watchlist series, score, and print a pretty terminal table."""
     opportunities, series_log, diag, _news_ctx = _run_scan(
-        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi, news=news,
+        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
+        news=news, polymarket=polymarket,
     )
     ranked = rank(opportunities)
     _print_summary(ranked, series_log, diag)
@@ -209,10 +279,12 @@ def report(
     ),
     persist: bool = typer.Option(True),
     news: bool = typer.Option(True, "--news/--no-news"),
+    polymarket: bool = typer.Option(True, "--polymarket/--no-polymarket"),
 ) -> None:
     """Run a scan and produce the daily report (terminal + optional email)."""
     opportunities, series_log, diag, _news_ctx = _run_scan(
-        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi, news=news,
+        min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
+        news=news, polymarket=polymarket,
     )
     ranked = rank(opportunities)
     _print_summary(ranked, series_log, diag)
