@@ -84,7 +84,7 @@ class IMAPConfig:
         def req(key: str) -> str:
             v = os.environ.get(key)
             if not v:
-                raise EmailConfigError(f"missing env var: {key}")
+                raise IMAPConfigError(f"missing env var: {key}")
             return v
 
         return cls(
