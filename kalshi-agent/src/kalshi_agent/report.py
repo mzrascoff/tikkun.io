@@ -12,85 +12,96 @@ from .scoring import Opportunity
 from .watchlist import trade_url
 
 
-def _sorted(opps: Iterable[Opportunity]) -> list[Opportunity]:
-    return sorted(opps, key=lambda o: o.score, reverse=True)
+def _ordered(opps: Iterable[Opportunity]) -> list[Opportunity]:
+    """Trust the input order if it looks pre-ranked (rank() populates
+    rank_reason); otherwise fall back to sorting by score."""
+    rows = list(opps)
+    if rows and any(o.rank_reason for o in rows):
+        return rows
+    return sorted(rows, key=lambda o: o.score, reverse=True)
 
 
 def render_markdown(opportunities: Iterable[Opportunity]) -> str:
     """Plain-markdown table for stdout dumps and tests."""
-    rows = _sorted(opportunities)
+    rows = _ordered(opportunities)
     if not rows:
         return "_No opportunities found._"
     lines = [
-        "| # | Ticker | Title | Side | Cost | Fair | Edge | ROI | Kelly | Days | Link |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| # | Ticker | Title | Side | Cost | ROI | Annualized | Days | Why this rank | Link |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for i, o in enumerate(rows, 1):
         title = (o.market.title or o.market.ticker).replace("|", "\\|")
         url = trade_url(o.series_ticker, o.market.ticker)
+        reason = (o.rank_reason or "").replace("|", "\\|")
         lines.append(
             f"| {i} | `{o.market.ticker}` | {title} | **{o.side}** | "
-            f"{o.cost:.2f} | {o.fair:.2f} | {o.edge:+.2f} | {o.roi:.1%} | "
-            f"{o.kelly_fraction:.1%} | {o.days_to_resolve:.0f} | [trade]({url}) |"
+            f"{o.cost:.2f} | {o.roi:.1%} | {o.annualized_roi:.0%}/yr | "
+            f"{o.days_to_resolve:.0f} | {reason} | [trade]({url}) |"
         )
     return "\n".join(lines)
 
 
 def render_rich_table(opportunities: Iterable[Opportunity]) -> Table:
-    """Pretty terminal table with clickable trade links (OSC 8)."""
-    rows = _sorted(opportunities)
+    """Pretty terminal table with clickable trade links (OSC 8).
+
+    Trades are listed best-to-worst as ranked by `scoring.rank()`.
+    """
+    rows = _ordered(opportunities)
     table = Table(
-        title="Kalshi Edge Opportunities  (NO unless noted)",
+        title="Kalshi Edge Opportunities  —  best to worst",
         title_style="bold cyan",
         header_style="bold",
-        show_lines=False,
+        show_lines=True,
         expand=True,
     )
     table.add_column("#", justify="right", style="dim", width=3)
     table.add_column("Trade", style="bold cyan", overflow="fold")
     table.add_column("Side", justify="center", width=4)
     table.add_column("Cost", justify="right", width=6)
-    table.add_column("Fair", justify="right", width=6)
-    table.add_column("Edge", justify="right", width=6)
     table.add_column("ROI", justify="right", width=7, style="bold green")
+    table.add_column("Annual.", justify="right", width=8, style="bold green")
     table.add_column("¼-Kelly", justify="right", width=8)
     table.add_column("Days", justify="right", width=5)
-    table.add_column("Why", overflow="fold")
+    table.add_column("Why this rank", overflow="fold")
 
     if not rows:
-        table.add_row("—", "No opportunities found", "", "", "", "", "", "", "", "")
+        table.add_row("—", "No opportunities found", "", "", "", "", "", "", "")
         return table
 
     for i, o in enumerate(rows, 1):
         url = trade_url(o.series_ticker, o.market.ticker)
         title = o.market.title or o.market.ticker
-        # Rich's link markup renders OSC 8 in supporting terminals.
-        link_cell = Text.from_markup(f"[link={url}]{escape(title)}[/link]\n[dim]{o.market.ticker}[/dim]")
+        link_cell = Text.from_markup(
+            f"[link={url}]{escape(title)}[/link]\n[dim]{o.market.ticker}[/dim]"
+        )
         side_style = "green" if o.side == "NO" else "yellow"
         table.add_row(
             str(i),
             link_cell,
             Text(o.side, style=side_style),
             f"{o.cost:.2f}",
-            f"{o.fair:.2f}",
-            f"{o.edge:+.2f}",
             f"{o.roi:.1%}",
+            f"{o.annualized_roi:.0%}/yr",
             f"{o.kelly_fraction / 4:.1%}",
             f"{o.days_to_resolve:.0f}",
-            o.prior.rationale,
+            o.rank_reason or o.prior.rationale,
         )
     return table
 
 
 def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime | None = None) -> str:
-    """Self-contained HTML email body. Inline CSS for client compatibility."""
-    rows = _sorted(opportunities)
+    """Self-contained HTML email body. Inline CSS for client compatibility.
+
+    Trades are listed best-to-worst as ranked by `scoring.rank()`.
+    """
+    rows = _ordered(opportunities)
     when = (generated_at or datetime.utcnow()).strftime("%Y-%m-%d %H:%M UTC")
     head = f"""<!doctype html>
 <html><head><meta charset="utf-8"></head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color:#1a1a1a; max-width:780px; margin:24px auto; padding:0 16px;">
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color:#1a1a1a; max-width:820px; margin:24px auto; padding:0 16px;">
   <h1 style="font-size:20px; margin:0 0 4px 0;">Kalshi Edge Opportunities</h1>
-  <p style="color:#666; margin:0 0 18px 0; font-size:13px;">Generated {when} &middot; ranked by composite score &middot; ¼-Kelly suggested sizing</p>
+  <p style="color:#666; margin:0 0 18px 0; font-size:13px;">Generated {when} &middot; ranked best to worst &middot; annualized ROI shown &middot; ¼-Kelly suggested sizing</p>
 """
 
     if not rows:
@@ -103,11 +114,11 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
         <th style="border-bottom:2px solid #ddd;">Trade</th>
         <th style="border-bottom:2px solid #ddd;">Side</th>
         <th style="border-bottom:2px solid #ddd; text-align:right;">Cost</th>
-        <th style="border-bottom:2px solid #ddd; text-align:right;">Fair</th>
-        <th style="border-bottom:2px solid #ddd; text-align:right;">Edge</th>
         <th style="border-bottom:2px solid #ddd; text-align:right;">ROI</th>
+        <th style="border-bottom:2px solid #ddd; text-align:right;">Annual.</th>
         <th style="border-bottom:2px solid #ddd; text-align:right;">¼-Kelly</th>
         <th style="border-bottom:2px solid #ddd; text-align:right;">Days</th>
+        <th style="border-bottom:2px solid #ddd;">Why this rank</th>
       </tr>
     </thead>
     <tbody>
@@ -116,23 +127,24 @@ def render_html(opportunities: Iterable[Opportunity], *, generated_at: datetime 
         url = trade_url(o.series_ticker, o.market.ticker)
         title = escape(o.market.title or o.market.ticker)
         ticker = escape(o.market.ticker)
-        why = escape(o.prior.rationale)
+        rationale = escape(o.prior.rationale)
+        reason = escape(o.rank_reason or "")
         side_color = "#0a7a30" if o.side == "NO" else "#a36600"
         row_bg = "#ffffff" if i % 2 else "#fafafa"
         table += f"""      <tr style="background:{row_bg}; vertical-align:top;">
-        <td style="border-bottom:1px solid #eee; color:#888;">{i}</td>
+        <td style="border-bottom:1px solid #eee; color:#888; font-weight:700;">{i}</td>
         <td style="border-bottom:1px solid #eee;">
           <a href="{url}" style="color:#0a66c2; text-decoration:none; font-weight:600;">{title}</a><br>
           <span style="color:#888; font-family:monospace; font-size:11px;">{ticker}</span><br>
-          <span style="color:#555; font-size:12px;">{why}</span>
+          <span style="color:#555; font-size:12px;">{rationale}</span>
         </td>
         <td style="border-bottom:1px solid #eee; color:{side_color}; font-weight:700;">{o.side}</td>
         <td style="border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums;">{o.cost:.2f}</td>
-        <td style="border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums;">{o.fair:.2f}</td>
-        <td style="border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums;">{o.edge:+.2f}</td>
         <td style="border-bottom:1px solid #eee; text-align:right; font-weight:700; color:#0a7a30; font-variant-numeric:tabular-nums;">{o.roi:.1%}</td>
+        <td style="border-bottom:1px solid #eee; text-align:right; font-weight:700; color:#0a7a30; font-variant-numeric:tabular-nums;">{o.annualized_roi:.0%}/yr</td>
         <td style="border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums;">{o.kelly_fraction / 4:.1%}</td>
         <td style="border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums;">{o.days_to_resolve:.0f}</td>
+        <td style="border-bottom:1px solid #eee; color:#444; font-size:12px;">{reason}</td>
       </tr>
 """
     table += "    </tbody>\n  </table>\n"

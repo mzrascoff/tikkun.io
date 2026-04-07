@@ -14,7 +14,7 @@ from .filters import days_until
 from .mailer import EmailConfigError, send_html_email
 from .priors import estimate_prior
 from .report import render_html, render_markdown, render_rich_table
-from .scoring import Opportunity, evaluate
+from .scoring import Opportunity, evaluate, rank
 from .storage import Store
 from .watchlist import WATCHLIST
 
@@ -165,9 +165,10 @@ def scan(
     opportunities, series_log, diag = _run_scan(
         min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
     )
-    _print_summary(opportunities, series_log, diag)
-    if persist and opportunities:
-        scan_id = Store(db).record_scan(opportunities)
+    ranked = rank(opportunities)
+    _print_summary(ranked, series_log, diag)
+    if persist and ranked:
+        scan_id = Store(db).record_scan(ranked)
         console.print(f"\n[dim]Persisted scan #{scan_id} to {db}[/dim]")
 
 
@@ -189,30 +190,31 @@ def report(
     opportunities, series_log, diag = _run_scan(
         min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
     )
-    _print_summary(opportunities, series_log, diag)
+    ranked = rank(opportunities)
+    _print_summary(ranked, series_log, diag)
 
     # Always write the HTML report to disk so launchd users can inspect it.
     now = datetime.now(tz=timezone.utc)
-    html = render_html(opportunities, generated_at=now)
+    html = render_html(ranked, generated_at=now)
     html_path = Path("data/last-report.html")
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html)
     console.print(f"[dim]HTML report written to {html_path}[/dim]")
 
-    if persist and opportunities:
-        scan_id = Store(db).record_scan(opportunities)
+    if persist and ranked:
+        scan_id = Store(db).record_scan(ranked)
         console.print(f"[dim]Persisted scan #{scan_id} to {db}[/dim]")
 
     if email:
         try:
             subject = (
                 f"Kalshi Edge Report — {now.strftime('%Y-%m-%d')} — "
-                f"{len(opportunities)} opportunities"
+                f"{len(ranked)} opportunities"
             )
             send_html_email(
                 subject=subject,
                 html_body=html,
-                text_fallback=render_markdown(opportunities),
+                text_fallback=render_markdown(ranked),
             )
             console.print(f"[green]✓[/green] Emailed report to recipients.")
         except EmailConfigError as e:

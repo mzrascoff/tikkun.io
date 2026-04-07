@@ -1,8 +1,9 @@
 """Edge, Kelly, and fee-adjusted ROI for a (market, prior) pair."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
+from typing import Iterable
 
 from .api import Market
 from .filters import days_until
@@ -12,20 +13,30 @@ from .priors import Prior
 # conservative round-trip drag we apply to all gross ROIs.
 DEFAULT_FEE_DRAG = 0.02
 
+# Cap days when annualizing so a 4-year longshot doesn't look better
+# than a 6-month one. The longer the window, the more time a tail
+# event has to actually fire.
+ANNUALIZATION_DAY_CAP = 540  # ~18 months
+THIN_EDGE_THRESHOLD = 0.10  # ROI below this gets penalized — fees eat it
+LONG_LOCKUP_DAYS = 730       # 2y+ trades take a confidence haircut
+CORRELATION_DECAY = 0.5      # 2nd ticket from same series scores 50%, 3rd 25%, ...
+
 
 @dataclass(frozen=True)
 class Opportunity:
     market: Market
     prior: Prior
-    side: str  # "YES" or "NO"
-    cost: float  # cents in [0, 1] you pay per contract
-    fair: float  # the prior probability of the side winning
-    edge: float  # fair - cost (always >= 0 for listed opportunities)
-    roi: float  # edge / cost, fee-adjusted
-    kelly_fraction: float  # full-Kelly bankroll fraction (use a fraction of this!)
+    side: str
+    cost: float
+    fair: float
+    edge: float
+    roi: float                # fee-adjusted dollar ROI on cost
+    kelly_fraction: float     # full-Kelly bankroll fraction
     days_to_resolve: float
-    score: float  # composite ranking score
-    series_ticker: str = ""  # which watchlist series this came from
+    score: float              # composite ranking score
+    series_ticker: str = ""
+    annualized_roi: float = 0.0
+    rank_reason: str = ""
 
 
 def _kelly(p: float, b: float) -> float:
@@ -115,22 +126,100 @@ def evaluate(
     return _scored(best)
 
 
+def _annualize(roi: float, days: float) -> float:
+    """Compound `roi` over `days`, treating days > ANNUALIZATION_DAY_CAP
+    as if they were ANNUALIZATION_DAY_CAP. The cap exists because a
+    longer window gives a tail event more chances to fire — pretending
+    a 4-year contract scales linearly to 1 year is dishonest."""
+    if roi <= 0:
+        return 0.0
+    effective_days = max(min(days, ANNUALIZATION_DAY_CAP), 1.0)
+    return (1.0 + roi) ** (365.0 / effective_days) - 1.0
+
+
 def _scored(o: Opportunity) -> Opportunity:
-    """Composite ranking score: ROI, weighted by prior confidence and
-    liquidity, divided by sqrt(days) so we prefer faster turns."""
-    liquidity = min(1.0, (o.market.open_interest / 5000.0))
-    time_penalty = max(1.0, (o.days_to_resolve / 30.0)) ** 0.5
-    score = (o.roi * o.prior.confidence * (0.5 + 0.5 * liquidity)) / time_penalty
-    return Opportunity(
-        market=o.market,
-        prior=o.prior,
-        side=o.side,
-        cost=o.cost,
-        fair=o.fair,
-        edge=o.edge,
-        roi=o.roi,
-        kelly_fraction=o.kelly_fraction,
-        days_to_resolve=o.days_to_resolve,
-        score=score,
-        series_ticker=o.series_ticker,
-    )
+    """Initial single-trade score (pre correlation pass).
+
+    score = annualized_roi
+            * prior.confidence
+            * thin_edge_factor      (penalizes tiny gross ROIs)
+            * long_lockup_factor    (penalizes 2y+ capital lockups)
+    """
+    annualized = _annualize(o.roi, o.days_to_resolve)
+
+    thin_edge_factor = 1.0
+    if o.roi < THIN_EDGE_THRESHOLD:
+        # Linearly scale from 1.0 at THIN_EDGE_THRESHOLD down to 0 at 0.
+        thin_edge_factor = max(0.0, o.roi / THIN_EDGE_THRESHOLD)
+
+    long_lockup_factor = 1.0
+    if o.days_to_resolve > LONG_LOCKUP_DAYS:
+        # Each additional 365 days past LONG_LOCKUP_DAYS halves the score.
+        excess_years = (o.days_to_resolve - LONG_LOCKUP_DAYS) / 365.0
+        long_lockup_factor = 0.5 ** excess_years
+
+    score = annualized * o.prior.confidence * thin_edge_factor * long_lockup_factor
+
+    return replace(o, score=score, annualized_roi=annualized)
+
+
+def rank(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
+    """Apply the correlation pass and produce a final best-to-worst
+    ordering with rank_reason labels populated.
+
+    Steps:
+      1. Sort by initial score (set in _scored).
+      2. Walk top-to-bottom: each subsequent ticket from a series we've
+         already seen gets its score multiplied by CORRELATION_DECAY ** k.
+      3. Re-sort by adjusted score.
+      4. Compute and attach a human-readable rank_reason for each.
+    """
+    opps = list(opportunities)
+    if not opps:
+        return []
+
+    # Step 1: pre-rank by initial score so the correlation pass walks
+    # the highest-conviction trades first.
+    opps.sort(key=lambda o: o.score, reverse=True)
+
+    # Step 2: correlation decay
+    series_seen: dict[str, int] = {}
+    adjusted: list[Opportunity] = []
+    for o in opps:
+        seen = series_seen.get(o.series_ticker, 0)
+        decay = CORRELATION_DECAY ** seen
+        adjusted.append(replace(o, score=o.score * decay))
+        series_seen[o.series_ticker] = seen + 1
+
+    # Step 3: final sort
+    adjusted.sort(key=lambda o: o.score, reverse=True)
+
+    # Step 4: rank_reason labels
+    if adjusted:
+        best_annualized = max(o.annualized_roi for o in adjusted)
+        highest_confidence = max(o.prior.confidence for o in adjusted)
+    else:
+        best_annualized = 0.0
+        highest_confidence = 0.0
+
+    series_rank: dict[str, int] = {}
+    labeled: list[Opportunity] = []
+    for o in adjusted:
+        reasons: list[str] = []
+        if o.prior.confidence == highest_confidence and o.prior.confidence >= 0.8:
+            reasons.append("highest certainty")
+        if abs(o.annualized_roi - best_annualized) < 1e-9 and best_annualized > 0:
+            reasons.append("best annualized")
+        s_rank = series_rank.get(o.series_ticker, 0)
+        if s_rank > 0:
+            reasons.append(f"correlated to higher {o.series_ticker} pick")
+        if o.roi < THIN_EDGE_THRESHOLD:
+            reasons.append("thin edge — fees may eat it")
+        if o.days_to_resolve > LONG_LOCKUP_DAYS:
+            reasons.append("long capital lockup")
+        if not reasons:
+            reasons.append("solid risk-adjusted return")
+        series_rank[o.series_ticker] = s_rank + 1
+        labeled.append(replace(o, rank_reason="; ".join(reasons)))
+
+    return labeled
