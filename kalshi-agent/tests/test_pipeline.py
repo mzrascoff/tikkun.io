@@ -74,10 +74,12 @@ def test_low_liquidity_market_excluded():
     assert not is_candidate(m, now=NOW)
 
 
-def test_unknown_category_no_prior():
+def test_unmatched_title_yields_no_prior():
+    """A tail-priced sports market passes structural filters but gets no
+    prior, so the pipeline correctly skips it."""
     m = _market(title="Will the Lakers win the title?", category="Sports")
-    assert not is_candidate(m, now=NOW)
-    assert estimate_prior(m, now=NOW) is None
+    assert is_candidate(m, now=NOW)  # structural shape is fine
+    assert estimate_prior(m, now=NOW) is None  # no keyword rule matches
 
 
 def test_room_temp_superconductor_prior():
