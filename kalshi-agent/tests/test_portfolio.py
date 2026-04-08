@@ -132,6 +132,45 @@ def test_parse_position_signed_position_field():
     assert abs(p.avg_cost - 1.1354) < 1e-6
 
 
+def test_parse_position_2026_schema_dollars_strings():
+    """Kalshi's 2026 /portfolio/positions schema uses position_fp (string
+    float, negative=NO) and *_dollars fields (string floats in dollars)."""
+    raw = {
+        "ticker": "KXALIENS-27",
+        "position_fp": "-1396.00",
+        "market_exposure_dollars": "1097.077000",
+        "total_traded_dollars": "1097.077000",
+        "realized_pnl_dollars": "0.000000",
+        "fees_paid_dollars": "16.473000",
+        "resting_orders_count": 0,
+        "last_updated_ts": "2026-04-08T06:04:43.686201Z",
+    }
+    p = parse_position(raw)
+    assert p is not None
+    assert p.ticker == "KXALIENS-27"
+    assert p.side == "NO"
+    assert p.quantity == 1396
+    assert p.cost_basis_cents == 109708  # 1097.077 * 100, rounded
+    assert p.market_value_cents == 109708
+    assert p.realized_pnl_cents == 0
+    assert abs(p.cost_basis_dollars - 1097.08) < 0.01
+    assert abs(p.market_value_dollars - 1097.08) < 0.01
+
+
+def test_parse_position_2026_yes_side():
+    raw = {
+        "ticker": "KXOAIAGI-27",
+        "position_fp": "50.00",
+        "market_exposure_dollars": "32.500000",
+        "total_traded_dollars": "32.500000",
+        "realized_pnl_dollars": "0.000000",
+    }
+    p = parse_position(raw)
+    assert p is not None
+    assert p.side == "YES"
+    assert p.quantity == 50
+
+
 def test_parse_position_explicit_side_field():
     raw = {
         "ticker": "KXOAIAGI-26",

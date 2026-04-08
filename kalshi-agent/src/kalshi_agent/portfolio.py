@@ -106,8 +106,21 @@ def _safe_int(v) -> int:
             return 0
 
 
+def _dollars_to_cents(v) -> int:
+    """Parse a Kalshi string-encoded dollar amount (e.g. '1097.077000')
+    into integer cents. Kalshi's 2026 portfolio schema returns every
+    monetary field as a string in dollars rather than an int in cents."""
+    if v is None:
+        return 0
+    try:
+        return int(round(float(v) * 100))
+    except (TypeError, ValueError):
+        return 0
+
+
 def parse_balance(raw: dict) -> Balance:
-    """Kalshi /portfolio/balance returns balance in cents."""
+    """Kalshi /portfolio/balance returns {balance, portfolio_value,
+    updated_ts}, all in cents as ints."""
     return Balance(
         settled_cents=_safe_int(raw.get("balance")),
         reserved_cents=_safe_int(raw.get("payout")) or _safe_int(raw.get("reserved")),
@@ -115,32 +128,51 @@ def parse_balance(raw: dict) -> Balance:
 
 
 def parse_position(raw: dict) -> Position | None:
-    """Kalshi /portfolio/positions entries.
+    """Parse one /portfolio/positions entry.
 
-    Schema (as of 2026):
-      ticker, position (signed contracts), market_exposure (cents),
-      realized_pnl (cents), total_traded (cents), resting_orders_count
+    Handles two schemas:
+      * 2026: position_fp (string float, negative=NO), *_dollars fields
+        (string floats in dollars), ticker.
+      * Legacy: position (signed int), *_cents or bare int fields, ticker.
 
-    A positive `position` is a YES holding; negative is NO. Some Kalshi
-    payloads instead use a separate `side` field — handle both.
+    Returns None for zero-quantity entries or malformed payloads.
     """
     ticker = raw.get("ticker") or raw.get("market_ticker")
     if not ticker:
         return None
-    raw_position = raw.get("position")
-    explicit_side = (raw.get("side") or "").lower().strip()
 
-    if explicit_side in ("yes", "no") and raw_position is not None:
+    # 2026 schema — prefer this when position_fp is present.
+    position_fp = raw.get("position_fp")
+    if position_fp is not None:
+        try:
+            position_val = float(position_fp)
+        except (TypeError, ValueError):
+            return None
+        if position_val == 0:
+            return None
+        return Position(
+            ticker=ticker,
+            side="YES" if position_val > 0 else "NO",
+            quantity=abs(int(position_val)),
+            cost_basis_cents=_dollars_to_cents(raw.get("total_traded_dollars")),
+            market_value_cents=_dollars_to_cents(raw.get("market_exposure_dollars")),
+            realized_pnl_cents=_dollars_to_cents(raw.get("realized_pnl_dollars")),
+        )
+
+    # Legacy schema — signed int `position` and bare int fields.
+    raw_position = raw.get("position")
+    if raw_position is None:
+        return None
+    explicit_side = (raw.get("side") or "").lower().strip()
+    if explicit_side in ("yes", "no"):
         side = explicit_side.upper()
         quantity = abs(_safe_int(raw_position))
-    elif raw_position is not None:
+    else:
         position = _safe_int(raw_position)
         if position == 0:
             return None
         side = "YES" if position > 0 else "NO"
         quantity = abs(position)
-    else:
-        return None
 
     return Position(
         ticker=ticker,
