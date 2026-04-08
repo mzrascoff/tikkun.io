@@ -190,18 +190,22 @@ def fetch_portfolio(
             ctx.fetch_error = f"balance: {type(e).__name__}: {e}"
             return ctx
 
-        # Positions, paginated. Cap by detecting a stuck/repeating cursor
-        # rather than a fixed iteration count, so legitimate large
-        # accounts paginate fully but a buggy server can't loop forever.
+        # Positions, paginated. Kalshi requires the signed path to
+        # exclude the query string, so we sign the base path and build
+        # the request URL with a separate `params=` dict. Cap by
+        # detecting a stuck/repeating cursor rather than a fixed
+        # iteration count, so legitimate large accounts paginate fully
+        # but a buggy server can't loop forever.
+        positions_path = f"{API_PATH_PREFIX}/portfolio/positions"
         cursor: str | None = None
         seen_cursors: set[str] = set()
         while True:
-            path = f"{API_PATH_PREFIX}/portfolio/positions?limit=200"
+            params: dict[str, str] = {"limit": "200"}
             if cursor:
-                path += f"&cursor={cursor}"
-            headers = dict(sign_request(creds, method="GET", path=path))
+                params["cursor"] = cursor
+            headers = dict(sign_request(creds, method="GET", path=positions_path))
             try:
-                resp = client.get(f"{API_HOST}{path}", headers=headers)
+                resp = client.get(f"{API_HOST}{positions_path}", params=params, headers=headers)
             except httpx.HTTPError as e:
                 ctx.fetch_error = f"positions: {type(e).__name__}: {e}"
                 return ctx
