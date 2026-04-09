@@ -22,8 +22,14 @@ from .polymarket import (
 )
 from .portfolio import PortfolioContext, fetch_portfolio
 from .priors import estimate_prior
-from .report import render_html, render_markdown, render_rich_table
-from .scoring import Opportunity, evaluate, rank
+from .report import (
+    render_grouped_html,
+    render_grouped_sections,
+    render_html,
+    render_markdown,
+    render_rich_table,
+)
+from .scoring import Opportunity, evaluate, group_opportunities, rank, split_new_vs_held
 from .storage import Store
 from .watchlist import SERIES_BY_TICKER, WATCHLIST
 
@@ -59,12 +65,17 @@ def _attach_signals(
             email_confidence_drag=email_confidence_adjustment(len(matched_emails)),
         )
     if portfolio_ctx is not None and portfolio_ctx.balance is not None:
-        existing = portfolio_ctx.position_for(op.market.ticker)
+        # Try the market ticker, the market's event_ticker, and the
+        # originating series ticker — Kalshi's position endpoint
+        # sometimes returns event-level identifiers rather than the
+        # specific market ticker we fetched.
+        candidates = (op.market.ticker, op.market.event_ticker, series_ticker)
+        existing = portfolio_ctx.position_for(*candidates)
         if existing is not None:
             op = dataclasses.replace(
                 op,
                 current_position=existing,
-                concentration_pct=portfolio_ctx.concentration_pct(op.market.ticker),
+                concentration_pct=portfolio_ctx.concentration_pct(*candidates),
             )
     return op
 
@@ -299,7 +310,10 @@ def _print_summary(
         console.print(render_portfolio_panel(portfolio_ctx))
 
     if show_table:
-        console.print(render_rich_table(opportunities))
+        groups = group_opportunities(opportunities)
+        new_groups, held_groups = split_new_vs_held(groups)
+        for tbl in render_grouped_sections(new_groups, held_groups):
+            console.print(tbl)
 
 
 @app.command()
@@ -358,7 +372,12 @@ def report(
 
     # Always write the HTML report to disk so launchd users can inspect it.
     now = datetime.now(tz=timezone.utc)
-    html = render_html(ranked, generated_at=now, portfolio_ctx=portfolio_ctx)
+    groups = group_opportunities(ranked)
+    new_groups, held_groups = split_new_vs_held(groups)
+    html = render_grouped_html(
+        new_groups, held_groups,
+        generated_at=now, portfolio_ctx=portfolio_ctx,
+    )
     html_path = Path("data/last-report.html")
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html)

@@ -33,6 +33,7 @@ class Market:
     open_interest: int
     close_time: str  # ISO8601
     status: str
+    event_ticker: str = ""  # parent event, e.g. KXALIENS-27 for an alien market
 
     @classmethod
     def from_api(cls, raw: dict) -> "Market":
@@ -80,6 +81,7 @@ class Market:
             open_interest=raw.get("open_interest") or 0,
             close_time=raw.get("close_time", ""),
             status=raw.get("status", ""),
+            event_ticker=raw.get("event_ticker") or "",
         )
 
 

@@ -77,18 +77,33 @@ class PortfolioContext:
         positions = sum(p.market_value_dollars for p in self.positions)
         return cash + positions
 
-    def position_for(self, ticker: str) -> Position | None:
+    def position_for(self, *tickers: str) -> Position | None:
+        """Find a position matching any of the given ticker candidates.
+
+        Kalshi position entries and market entries occasionally use
+        different ticker forms (market ticker vs event ticker vs
+        normalized case). Callers pass every known form and we return
+        the first match, trying exact and then case/whitespace-
+        normalized equality.
+        """
+        candidates = {t for t in tickers if t}
+        if not candidates:
+            return None
         for p in self.positions:
-            if p.ticker == ticker:
+            if p.ticker in candidates:
+                return p
+        normalized = {t.strip().upper() for t in candidates}
+        for p in self.positions:
+            if p.ticker.strip().upper() in normalized:
                 return p
         return None
 
-    def concentration_pct(self, ticker: str) -> float:
-        """What fraction of total bankroll is in this single ticker."""
+    def concentration_pct(self, *tickers: str) -> float:
+        """What fraction of total bankroll is in the matched ticker."""
         bankroll = self.total_bankroll_dollars
         if bankroll <= 0:
             return 0.0
-        pos = self.position_for(ticker)
+        pos = self.position_for(*tickers)
         if pos is None:
             return 0.0
         return pos.market_value_dollars / bankroll

@@ -1,7 +1,7 @@
-"""Edge, Kelly, and fee-adjusted ROI for a (market, prior) pair."""
+"""Edge, Kelly, fee-adjusted ROI, ranker, and group aggregation."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Iterable, Protocol
 
@@ -259,3 +259,104 @@ def rank(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
         labeled.append(replace(o, rank_reason="; ".join(reasons)))
 
     return labeled
+
+
+# ----------------- grouping + new-vs-held split -----------------
+
+@dataclass(frozen=True)
+class OpportunityGroup:
+    """All opportunities on the same (venue, series) — correlated bets.
+
+    `primary` is the highest-scoring contract and drives the group's
+    placement in the ranked list. `contracts` includes primary plus
+    every sibling contract sorted by score (best first). `held` is
+    True if any contract in the group matches an existing Kalshi
+    position, which routes the group to the "already in your
+    portfolio" section of the report.
+    """
+    venue: str
+    series_ticker: str
+    label: str
+    primary: Opportunity
+    contracts: tuple[Opportunity, ...]
+    held: bool
+
+    @property
+    def score(self) -> float:
+        return self.primary.score
+
+    @property
+    def held_market_value_dollars(self) -> float:
+        return sum(
+            c.current_position.market_value_dollars
+            for c in self.contracts
+            if c.current_position is not None
+        )
+
+    @property
+    def max_concentration_pct(self) -> float:
+        return max((c.concentration_pct for c in self.contracts), default=0.0)
+
+
+def group_opportunities(opportunities: Iterable[Opportunity]) -> list[OpportunityGroup]:
+    """Collapse correlated contracts into one OpportunityGroup per
+    (venue, series_ticker). Groups are sorted best-to-worst by the
+    score of their highest-scoring contract."""
+    buckets: dict[tuple[str, str], list[Opportunity]] = {}
+    for o in opportunities:
+        key = (o.venue, o.series_ticker)
+        buckets.setdefault(key, []).append(o)
+
+    groups: list[OpportunityGroup] = []
+    for (venue, series), members in buckets.items():
+        members.sort(key=lambda o: o.score, reverse=True)
+        primary = members[0]
+        label = _group_label(series, primary)
+        held = any(c.current_position is not None for c in members)
+        groups.append(
+            OpportunityGroup(
+                venue=venue,
+                series_ticker=series,
+                label=label,
+                primary=primary,
+                contracts=tuple(members),
+                held=held,
+            )
+        )
+    groups.sort(key=lambda g: g.primary.score, reverse=True)
+    return groups
+
+
+def split_new_vs_held(
+    groups: Iterable[OpportunityGroup],
+) -> tuple[list[OpportunityGroup], list[OpportunityGroup]]:
+    """Partition groups into (new, held)."""
+    new: list[OpportunityGroup] = []
+    held: list[OpportunityGroup] = []
+    for g in groups:
+        (held if g.held else new).append(g)
+    return new, held
+
+
+# Map from Kalshi series ticker prefix to a short human label. Anything
+# not in the map falls back to the primary contract's market title.
+_SERIES_LABELS: dict[str, str] = {
+    "KXALIENS": "Aliens confirmed",
+    "KXSUPERCON": "Room-temp superconductor",
+    "KXOAIAGI": "OpenAI AGI",
+    "KXAGI": "AGI declared",
+    "KXHLS": "SpaceX Human Landing System",
+    "KXSTARSHIP": "Starship milestones",
+    "KXMARS": "Crewed Mars landing",
+    "KXFUSION": "Commercial fusion",
+    "KXCURE": "Disease cure",
+    "KXALZ": "Alzheimer's cure",
+    "KXIRANNUKE": "Iran nuclear weapon",
+    "KXUSAIRANAGREEMENT": "US-Iran nuclear deal",
+}
+
+
+def _group_label(series_ticker: str, primary: Opportunity) -> str:
+    if series_ticker in _SERIES_LABELS:
+        return _SERIES_LABELS[series_ticker]
+    return primary.market.title or series_ticker
