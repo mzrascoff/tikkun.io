@@ -21,6 +21,7 @@ from typing import Iterable
 from rich.table import Table
 from rich.text import Text
 
+from .api import Market
 from .scoring import Opportunity, OpportunityGroup
 from .watchlist import trade_url
 
@@ -331,6 +332,21 @@ def render_html(
 
 # ----------------- grouped two-section renderers -----------------
 
+def _group_headlines(g: OpportunityGroup, limit: int = 4) -> list:
+    """Collect matched headlines across every contract in the group,
+    deduped by title, ordered by recency (most recent first)."""
+    seen_titles: set[str] = set()
+    unique = []
+    for c in g.contracts:
+        for h in c.news_headlines:
+            if h.title in seen_titles:
+                continue
+            seen_titles.add(h.title)
+            unique.append(h)
+    unique.sort(key=lambda h: h.published, reverse=True)
+    return unique[:limit]
+
+
 def _group_table(title: str, title_style: str, groups: list[OpportunityGroup]) -> Table:
     """Build one rich.Table for a list of OpportunityGroups."""
     table = Table(
@@ -341,41 +357,34 @@ def _group_table(title: str, title_style: str, groups: list[OpportunityGroup]) -
         expand=True,
     )
     table.add_column("#", justify="right", style="dim", width=3)
-    table.add_column("Thesis", style="bold cyan", overflow="fold")
+    table.add_column("Thesis", style="bold cyan", overflow="fold", ratio=3)
     table.add_column("Side", justify="center", width=4)
     table.add_column("Best ROI", justify="right", width=9, style="bold green")
     table.add_column("Annual.", justify="right", width=8, style="bold green")
     table.add_column("¼-Kelly", justify="right", width=8)
-    table.add_column("News", justify="center", width=5)
-    table.add_column("Notes", overflow="fold")
+    table.add_column("Days", justify="right", width=5)
+    table.add_column("News", overflow="fold", ratio=3)
+    table.add_column("Notes", overflow="fold", ratio=2)
 
     if not groups:
-        table.add_row("—", "none", "", "", "", "", "", "")
+        table.add_row("—", "none", "", "", "", "", "", "", "")
         return table
 
     for i, g in enumerate(groups, 1):
         p = g.primary
         url = trade_url(p.series_ticker, p.market.ticker, p.venue)
-        # First line: human label + venue badge
-        venue_color = "magenta" if g.venue == "polymarket" else "cyan"
         header_line = f"[link={url}]{escape(g.label)}[/link] [dim]({g.venue})[/dim]"
 
-        # Sub-contracts block: list up to 4 sibling tickers with their
-        # individual cost / ROI / days — so the user sees the full shape
-        # of the correlated bet without the ranker treating them as
-        # independent positions.
         contract_lines = []
         for c in g.contracts[:5]:
-            cost_str = f"${c.cost:.2f}"
             contract_lines.append(
                 f"  [dim]{escape(c.market.ticker)}[/dim]  "
-                f"{cost_str}  ROI {c.roi:.0%}  {c.annualized_roi:.0%}/yr  "
+                f"${c.cost:.2f}  ROI {c.roi:.0%}  {c.annualized_roi:.0%}/yr  "
                 f"{c.days_to_resolve:.0f}d"
             )
         if len(g.contracts) > 5:
             contract_lines.append(f"  [dim]... and {len(g.contracts) - 5} more[/dim]")
 
-        # Position info for held groups
         position_line = ""
         if g.held:
             held_dollars = g.held_market_value_dollars
@@ -386,38 +395,36 @@ def _group_table(title: str, title_style: str, groups: list[OpportunityGroup]) -
                 f"({max_pct:.0%} of bankroll){warn}[/bold magenta]"
             )
 
-        # Top headline, if any
-        news_line = ""
-        if p.news_headlines:
-            top = p.news_headlines[0]
-            news_line = (
-                f"[yellow]📰[/yellow] [link={escape(top.link)}]{escape(top.title[:80])}[/link] "
-                f"[dim]({escape(top.source)})[/dim]"
-            )
-
         cell_lines = [header_line]
         if position_line:
             cell_lines.append(position_line)
         cell_lines.extend(contract_lines)
-        if news_line:
-            cell_lines.append(news_line)
         cell_lines.append(f"[dim]{escape(p.prior.rationale)}[/dim]")
+        thesis_cell = Text.from_markup("\n".join(cell_lines))
 
-        link_cell = Text.from_markup("\n".join(cell_lines))
+        # News column: deduped headlines across all contracts in the
+        # group, shown with source attribution and clickable links.
+        headlines = _group_headlines(g)
+        if headlines:
+            news_lines = [
+                f"[yellow]📰[/yellow] [link={escape(h.link)}]{escape(h.title[:90])}[/link] "
+                f"[dim]({escape(h.source)})[/dim]"
+                for h in headlines
+            ]
+            news_cell = Text.from_markup("\n".join(news_lines))
+        else:
+            news_cell = Text("—", style="dim")
+
         side_style = "green" if p.side == "NO" else "yellow"
-        news_count = sum(len(c.news_headlines) for c in g.contracts)
-        news_cell = (
-            Text(str(news_count), style="bold yellow")
-            if news_count else Text("·", style="dim")
-        )
 
         table.add_row(
             str(i),
-            link_cell,
+            thesis_cell,
             Text(p.side, style=side_style),
             f"{p.roi:.0%}",
             f"{p.annualized_roi:.0%}/yr",
             f"{p.kelly_fraction / 4:.0%}",
+            f"{p.days_to_resolve:.0f}",
             news_cell,
             p.rank_reason or "—",
         )
@@ -449,7 +456,8 @@ def render_grouped_sections(
 
 
 def _render_group_html_row(g: OpportunityGroup, i: int, *, row_bg: str) -> str:
-    """One row of the grouped HTML email: header + child contracts."""
+    """One row of the grouped HTML email: header + child contracts,
+    with news in its own column."""
     p = g.primary
     url = trade_url(p.series_ticker, p.market.ticker, p.venue)
     label = escape(g.label)
@@ -487,25 +495,27 @@ def _render_group_html_row(g: OpportunityGroup, i: int, *, row_bg: str) -> str:
             f'({max_pct:.0%} of bankroll){warn}</strong></div>'
         )
 
-    news_html = ""
-    if p.news_headlines:
-        news_lines = [
-            _signal_line(
-                icon="📰",
-                icon_color="#a36600",
-                primary_html=(
-                    f'<a href="{escape(h.link)}" style="color:#0a66c2; text-decoration:none;">'
-                    f'{escape(h.title)}</a>'
-                ),
-                secondary=f"({h.source})",
-            )
-            for h in p.news_headlines
-        ]
-        news_html = _side_panel(news_lines, bg="#fff8e6", border="#f0c040")
+    # News cell: deduped headlines across all contracts in the group.
+    headlines = _group_headlines(g)
+    if headlines:
+        news_items = "".join(
+            f'<div style="margin-top:4px; font-size:11px;">'
+            f'<span style="color:#a36600;">📰</span> '
+            f'<a href="{escape(h.link)}" style="color:#0a66c2; text-decoration:none;">{escape(h.title)}</a>'
+            f'<br><span style="color:#888; font-size:10px;">({escape(h.source)})</span>'
+            f'</div>'
+            for h in headlines
+        )
+        news_cell_html = (
+            f'<div style="padding:6px 8px; background:#fff8e6; '
+            f'border-left:3px solid #f0c040; border-radius:2px;">{news_items}</div>'
+        )
+    else:
+        news_cell_html = '<span style="color:#ccc;">—</span>'
 
     return f"""    <tr style="background:{row_bg}; vertical-align:top;">
       <td style="padding:10px 8px; border-bottom:1px solid #eee; color:#888; font-weight:700;">{i}</td>
-      <td style="padding:10px 8px; border-bottom:1px solid #eee;">
+      <td style="padding:10px 8px; border-bottom:1px solid #eee; width:32%;">
         <div style="font-size:14px; font-weight:600;">
           <a href="{url}" style="color:#0a66c2; text-decoration:none;">{label}</a>
           <span style="display:inline-block; margin-left:6px; padding:1px 6px; border-radius:8px; background:{venue_color}; color:#fff; font-size:10px; font-weight:700; text-transform:uppercase;">{venue}</span>
@@ -513,12 +523,12 @@ def _render_group_html_row(g: OpportunityGroup, i: int, *, row_bg: str) -> str:
         <div style="color:#555; font-size:12px; margin-top:4px;">{rationale}</div>
         {contract_rows_html}
         {position_html}
-        {news_html}
       </td>
       <td style="padding:10px 8px; border-bottom:1px solid #eee; color:{side_color}; font-weight:700;">{p.side}</td>
       <td style="padding:10px 8px; border-bottom:1px solid #eee; text-align:right; font-weight:700; color:#0a7a30; font-variant-numeric:tabular-nums;">{p.roi:.0%}</td>
       <td style="padding:10px 8px; border-bottom:1px solid #eee; text-align:right; font-weight:700; color:#0a7a30; font-variant-numeric:tabular-nums;">{p.annualized_roi:.0%}/yr</td>
       <td style="padding:10px 8px; border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums;">{p.kelly_fraction / 4:.0%}</td>
+      <td style="padding:10px 8px; border-bottom:1px solid #eee; width:28%;">{news_cell_html}</td>
       <td style="padding:10px 8px; border-bottom:1px solid #eee; color:#444; font-size:12px;">{escape(p.rank_reason or "")}</td>
     </tr>
 """
@@ -546,6 +556,7 @@ def _render_groups_html_table(title: str, subtitle: str, groups: list[Opportunit
         <th style="padding:8px; text-align:right;">Best ROI</th>
         <th style="padding:8px; text-align:right;">Annual.</th>
         <th style="padding:8px; text-align:right;">¼-Kelly</th>
+        <th style="padding:8px;">News</th>
         <th style="padding:8px;">Notes</th>
       </tr>
     </thead>
@@ -561,10 +572,12 @@ def render_grouped_html(
     *,
     generated_at: datetime | None = None,
     portfolio_ctx=None,
+    recent_markets: list[Market] | None = None,
 ) -> str:
-    """Self-contained HTML email body with two sections: new opportunities
-    and existing positions, with correlated contracts collapsed into
-    single entries per group."""
+    """Self-contained HTML email body. Renders up to four sections:
+    portfolio summary, new opportunities, existing positions, and
+    recently-added Kalshi markets. Correlated contracts are collapsed
+    into single entries per group."""
     when = (generated_at or datetime.utcnow()).strftime("%Y-%m-%d %H:%M UTC")
     head = f"""<!doctype html>
 <html><head><meta charset="utf-8"></head>
@@ -585,6 +598,7 @@ def render_grouped_html(
                  "The ranker flags positions over 40% concentration as DO NOT ADD.",
         groups=held_groups,
     )
+    recent_html = _render_recent_markets_html(recent_markets or [])
 
     footer = """
   <p style="color:#888; font-size:11px; margin-top:18px;">
@@ -594,4 +608,125 @@ def render_grouped_html(
   </p>
 </body></html>
 """
-    return head + new_html + held_html + footer
+    return head + new_html + held_html + recent_html + footer
+
+
+# ----------------- recently-added markets section -----------------
+
+def _format_created_delta(created_iso: str, now: datetime | None = None) -> str:
+    """Produce 'X days ago' / 'today' / 'yesterday' from an ISO timestamp."""
+    if not created_iso:
+        return ""
+    try:
+        created = datetime.fromisoformat(created_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    now_utc = now or datetime.utcnow().replace(tzinfo=created.tzinfo)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=now_utc.tzinfo)
+    delta_days = (now_utc - created).total_seconds() / 86400
+    if delta_days < 1:
+        return "today"
+    if delta_days < 2:
+        return "yesterday"
+    return f"{int(delta_days)}d ago"
+
+
+def render_recent_markets_table(markets: list[Market]) -> Table:
+    """Rich.Table of newly-listed Kalshi markets that aren't already
+    covered by the curated watchlist. Purely informational — these
+    don't have priors yet, so they aren't scored or ranked by edge."""
+    table = Table(
+        title="Recently added on Kalshi  —  new questions + new contracts within existing events",
+        title_style="bold yellow",
+        header_style="bold",
+        show_lines=False,
+        expand=True,
+    )
+    table.add_column("Listed", justify="right", width=10, style="dim")
+    table.add_column("Ticker", style="bold cyan", overflow="fold", ratio=1)
+    table.add_column("Question", overflow="fold", ratio=3)
+    table.add_column("YES", justify="right", width=6)
+    table.add_column("NO", justify="right", width=6)
+    table.add_column("Close", justify="right", width=10, style="dim")
+
+    if not markets:
+        table.add_row("—", "", "No new markets listed in the last 2 weeks.", "", "", "")
+        return table
+
+    for m in markets[:25]:  # cap the list so the section stays scannable
+        url = trade_url(m.event_ticker or m.ticker, m.ticker)
+        yes = f"{m.yes_ask:.2f}" if m.yes_ask > 0 else "—"
+        no = f"{1 - m.yes_bid:.2f}" if m.yes_bid > 0 else "—"
+        close_short = (m.close_time or "")[:10]
+        ticker_cell = Text.from_markup(f"[link={url}]{escape(m.ticker)}[/link]")
+        table.add_row(
+            _format_created_delta(m.created_time),
+            ticker_cell,
+            escape(m.title or m.ticker),
+            yes,
+            no,
+            close_short,
+        )
+    if len(markets) > 25:
+        table.add_row(
+            "", "", f"... and {len(markets) - 25} more", "", "", "",
+        )
+    return table
+
+
+def _render_recent_markets_html(markets: list[Market]) -> str:
+    """HTML section listing newly-added Kalshi markets."""
+    if not markets:
+        return (
+            '<h2 style="font-size:16px; margin:24px 0 4px 0; color:#444;">'
+            'Recently added on Kalshi</h2>'
+            '<p style="color:#888; margin:0 0 18px 0; font-size:12px;">'
+            '<em>No new markets listed in the last 2 weeks outside the curated watchlist.</em></p>'
+        )
+
+    rows_html = ""
+    for i, m in enumerate(markets[:40], 1):
+        row_bg = "#ffffff" if i % 2 else "#fafafa"
+        url = trade_url(m.event_ticker or m.ticker, m.ticker)
+        yes = f"{m.yes_ask:.2f}" if m.yes_ask > 0 else "—"
+        no = f"{1 - m.yes_bid:.2f}" if m.yes_bid > 0 else "—"
+        close_short = escape((m.close_time or "")[:10])
+        delta = escape(_format_created_delta(m.created_time))
+        rows_html += f"""      <tr style="background:{row_bg}; vertical-align:top;">
+        <td style="padding:8px; border-bottom:1px solid #eee; color:#888; font-size:11px; white-space:nowrap;">{delta}</td>
+        <td style="padding:8px; border-bottom:1px solid #eee; font-family:monospace; font-size:11px;">
+          <a href="{url}" style="color:#0a66c2; text-decoration:none;">{escape(m.ticker)}</a>
+        </td>
+        <td style="padding:8px; border-bottom:1px solid #eee; font-size:12px;">{escape(m.title or m.ticker)}</td>
+        <td style="padding:8px; border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums; font-size:12px;">{yes}</td>
+        <td style="padding:8px; border-bottom:1px solid #eee; text-align:right; font-variant-numeric:tabular-nums; font-size:12px;">{no}</td>
+        <td style="padding:8px; border-bottom:1px solid #eee; color:#888; font-size:11px; white-space:nowrap;">{close_short}</td>
+      </tr>
+"""
+    trailing = ""
+    if len(markets) > 40:
+        trailing = (
+            f'<p style="color:#888; font-size:11px; margin-top:6px;">'
+            f'... and {len(markets) - 40} more markets not shown.</p>'
+        )
+
+    return f"""
+  <h2 style="font-size:16px; margin:24px 0 4px 0; color:#444;">Recently added on Kalshi</h2>
+  <p style="color:#888; margin:0 0 10px 0; font-size:12px;">New questions + new contracts within existing events, listed in the last 2 weeks, outside the curated watchlist. Informational — no priors or edge scoring applied.</p>
+  <table cellpadding="0" cellspacing="0" style="border-collapse:collapse; width:100%; font-size:12px;">
+    <thead>
+      <tr style="background:#f4f4f6; text-align:left;">
+        <th style="padding:8px;">Listed</th>
+        <th style="padding:8px;">Ticker</th>
+        <th style="padding:8px;">Question</th>
+        <th style="padding:8px; text-align:right;">YES</th>
+        <th style="padding:8px; text-align:right;">NO</th>
+        <th style="padding:8px;">Closes</th>
+      </tr>
+    </thead>
+    <tbody>
+{rows_html}    </tbody>
+  </table>
+  {trailing}
+"""

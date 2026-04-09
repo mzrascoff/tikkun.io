@@ -27,6 +27,7 @@ from .report import (
     render_grouped_sections,
     render_html,
     render_markdown,
+    render_recent_markets_table,
     render_rich_table,
 )
 from .scoring import Opportunity, evaluate, group_opportunities, rank, split_new_vs_held
@@ -109,20 +110,40 @@ def _run_scan(
     polymarket: bool = True,
     inbox: bool = True,
     portfolio: bool = True,
-) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict, NewsContext, PortfolioContext]:
-    """Shared fetch+score loop. Returns (opportunities, series_log, diag, news_ctx, portfolio_ctx)."""
+    discover_recent: bool = True,
+) -> tuple[list[Opportunity], list[tuple[str, int, int, int]], dict, NewsContext, PortfolioContext, list[Market]]:
+    """Shared fetch+score loop. Returns (opportunities, series_log, diag, news_ctx, portfolio_ctx, recent_markets)."""
     client = KalshiClient()
 
-    # Fetch news, inbox, and portfolio in parallel — they hit three
-    # independent remote services and would otherwise add ~3-4s of
-    # sequential I/O before the watchlist loop can start.
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    # Excluded tickers for the recently-added discovery pass — anything
+    # already covered by the curated watchlist shouldn't show up in the
+    # "new on Kalshi" section.
+    watchlist_prefixes = {s.ticker for s in WATCHLIST}
+
+    # Fetch news, inbox, portfolio, and recently-added markets in
+    # parallel — independent remote services add up to ~4s sequentially.
+    def _fetch_recent() -> list[Market]:
+        try:
+            recent_client = KalshiClient()
+            try:
+                return recent_client.fetch_recent_markets(
+                    lookback_days=14,
+                    exclude_event_tickers=watchlist_prefixes,
+                )
+            finally:
+                recent_client.close()
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
         news_future = pool.submit(fetch_news) if news else None
         email_future = pool.submit(fetch_emails) if inbox else None
         portfolio_future = pool.submit(fetch_portfolio) if portfolio else None
+        recent_future = pool.submit(_fetch_recent) if discover_recent else None
         news_ctx = news_future.result() if news_future else NewsContext()
         email_ctx = email_future.result() if email_future else EmailContext()
         portfolio_ctx = portfolio_future.result() if portfolio_future else PortfolioContext(enabled=False)
+        recent_markets: list[Market] = recent_future.result() if recent_future else []
 
     if news_ctx.headlines:
         console.print(
@@ -146,6 +167,12 @@ def _run_scan(
         )
     if portfolio_ctx.fetch_error:
         console.print(f"[dim yellow]portfolio warn: {portfolio_ctx.fetch_error}[/dim yellow]")
+
+    if recent_markets:
+        console.print(
+            f"[dim]Discovered {len(recent_markets)} newly-listed Kalshi "
+            f"markets (outside the watchlist)[/dim]"
+        )
 
     opportunities: list[Opportunity] = []
     series_log: list[tuple[str, int, int, int]] = []
@@ -278,7 +305,7 @@ def _run_scan(
     # Tag the polymarket pass into series_log so the summary table renders it.
     series_log.append(("POLYMARKET", *poly_log))
 
-    return opportunities, series_log, diag, news_ctx, portfolio_ctx
+    return opportunities, series_log, diag, news_ctx, portfolio_ctx, recent_markets
 
 
 def _print_summary(
@@ -288,6 +315,7 @@ def _print_summary(
     *,
     show_table: bool = True,
     portfolio_ctx: PortfolioContext | None = None,
+    recent_markets: list[Market] | None = None,
 ) -> None:
     diag_path = Path("data/last-scan-debug.json")
     diag_path.parent.mkdir(parents=True, exist_ok=True)
@@ -314,6 +342,8 @@ def _print_summary(
         new_groups, held_groups = split_new_vs_held(groups)
         for tbl in render_grouped_sections(new_groups, held_groups):
             console.print(tbl)
+        if recent_markets:
+            console.print(render_recent_markets_table(recent_markets))
 
 
 @app.command()
@@ -333,12 +363,16 @@ def scan(
                                    help="Pull live Kalshi positions via the authenticated API."),
 ) -> None:
     """Fetch each watchlist series, score, and print a pretty terminal table."""
-    opportunities, series_log, diag, _news_ctx, portfolio_ctx = _run_scan(
+    opportunities, series_log, diag, _news_ctx, portfolio_ctx, recent_markets = _run_scan(
         min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
         news=news, polymarket=polymarket, inbox=inbox, portfolio=portfolio,
     )
     ranked = rank(opportunities)
-    _print_summary(ranked, series_log, diag, portfolio_ctx=portfolio_ctx)
+    _print_summary(
+        ranked, series_log, diag,
+        portfolio_ctx=portfolio_ctx,
+        recent_markets=recent_markets,
+    )
     if persist and ranked:
         scan_id = Store(db).record_scan(ranked)
         console.print(f"\n[dim]Persisted scan #{scan_id} to {db}[/dim]")
@@ -363,12 +397,16 @@ def report(
     portfolio: bool = typer.Option(True, "--portfolio/--no-portfolio"),
 ) -> None:
     """Run a scan and produce the daily report (terminal + optional email)."""
-    opportunities, series_log, diag, _news_ctx, portfolio_ctx = _run_scan(
+    opportunities, series_log, diag, _news_ctx, portfolio_ctx, recent_markets = _run_scan(
         min_edge=min_edge, min_roi=min_roi, min_days=min_days, min_oi=min_oi,
         news=news, polymarket=polymarket, inbox=inbox, portfolio=portfolio,
     )
     ranked = rank(opportunities)
-    _print_summary(ranked, series_log, diag, portfolio_ctx=portfolio_ctx)
+    _print_summary(
+        ranked, series_log, diag,
+        portfolio_ctx=portfolio_ctx,
+        recent_markets=recent_markets,
+    )
 
     # Always write the HTML report to disk so launchd users can inspect it.
     now = datetime.now(tz=timezone.utc)
@@ -377,6 +415,7 @@ def report(
     html = render_grouped_html(
         new_groups, held_groups,
         generated_at=now, portfolio_ctx=portfolio_ctx,
+        recent_markets=recent_markets,
     )
     html_path = Path("data/last-report.html")
     html_path.parent.mkdir(parents=True, exist_ok=True)

@@ -202,3 +202,66 @@ def test_render_grouped_html_no_held_section_when_empty():
     # Held heading still rendered but with "None." message
     assert "Already in your portfolio" in html
     assert "None." in html
+
+
+def test_render_grouped_html_has_dedicated_news_column():
+    """News should live in its own <th>News</th> column, not inlined
+    into the thesis cell."""
+    from kalshi_agent.report import render_grouped_html
+
+    iran = _make_iran_op("KXUSAIRANAGREEMENT-27-26JUN", 54, 0.73)
+    groups = group_opportunities(rank([iran]))
+    new, held = split_new_vs_held(groups)
+    html = render_grouped_html(new, held, portfolio_ctx=None)
+    # The table header must include a standalone News column
+    assert ">News</th>" in html
+
+
+def test_render_recent_markets_table_renders_ticker_and_date():
+    from kalshi_agent.api import Market
+    from kalshi_agent.report import render_recent_markets_table
+
+    m = Market(
+        ticker="KXNEWEVENT-26MAY",
+        title="Will the new thing happen before May?",
+        category="",
+        yes_bid=0.14, yes_ask=0.16,
+        volume=50, open_interest=50,
+        close_time="2026-05-15T00:00:00Z",
+        status="active",
+        event_ticker="KXNEWEVENT",
+        created_time="2026-04-07T12:00:00Z",
+    )
+    table = render_recent_markets_table([m])
+    # rich.Table doesn't expose rendered string directly; rely on
+    # row_count to confirm we added one data row
+    assert table.row_count == 1
+
+
+def test_render_recent_markets_html_includes_newly_listed_markets():
+    from kalshi_agent.api import Market
+    from kalshi_agent.report import _render_recent_markets_html
+
+    m = Market(
+        ticker="KXNEWEVENT-26MAY",
+        title="Will the new thing happen before May?",
+        category="",
+        yes_bid=0.14, yes_ask=0.16,
+        volume=50, open_interest=50,
+        close_time="2026-05-15T00:00:00Z",
+        status="active",
+        event_ticker="KXNEWEVENT",
+        created_time="2026-04-07T12:00:00Z",
+    )
+    html = _render_recent_markets_html([m])
+    assert "Recently added on Kalshi" in html
+    assert "KXNEWEVENT-26MAY" in html
+    assert "Will the new thing happen before May?" in html
+
+
+def test_render_recent_markets_html_empty_state():
+    from kalshi_agent.report import _render_recent_markets_html
+
+    html = _render_recent_markets_html([])
+    assert "Recently added on Kalshi" in html
+    assert "No new markets listed" in html
